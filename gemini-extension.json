@@ -1,0 +1,12 @@
+{
+  "name": "linux-mentor",
+  "version": "0.1.0",
+  "description": "An AI-powered Linux mentor that uses the Socratic method to help with troubleshooting, system diagnostics, and educational guidance.",
+  "mcpServers": {
+    "linux-mentor": {
+    "command": "${extensionPath/linux-mentor-mcp",
+    "cwd": "${extensionPath}"
+    }
+  },
+  "contextFileName": "LINUXMENTOR.md"
+}

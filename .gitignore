@@ -31,3 +31,22 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+# React / TypeScript / Node.js
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+*.log
+
+# Environment variables and API credentials
+.env
+.env.*
+!.env.example
+
+# Go build artifacts
+bin/
+build/
+
+# Operating system files
+.DS_Store
+Thumbs.db

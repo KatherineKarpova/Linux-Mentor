@@ -1,0 +1,12 @@
+{
+  "linux-mentor-startup": {
+    "enabled": false,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "./scripts/on-session-start.sh",
+        "timeout": 10
+      }
+    ]
+  }
+}

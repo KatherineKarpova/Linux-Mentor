@@ -1,0 +1,91 @@
+Linux Mentor - Architecture and System Design
+
+Status
+------
+This document records the current implementation and the agreed product direction.
+It distinguishes working integration points from planned components.
+
+Product objective
+-----------------
+Linux Mentor is an educational assistant for Antigravity CLI. It should help
+learners reason through Linux troubleshooting and system concepts using concise,
+Socratic guidance, not automate the learner's work. Ubuntu and Fedora are the
+initial supported distributions. The intended audience includes university
+learners.
+
+Current decisions
+-----------------
+- Antigravity is the target host; Gemini CLI is no longer the target.
+- The MCP integration is written in Go and uses stdio.
+- A desktop chat UI is intended to keep assistant explanations and questions
+  out of the terminal. The user's interaction remains in Antigravity for now;
+  sending user messages from the UI is out of scope.
+- The planned UI stack is Wails with TypeScript and React.
+- The UI should display assistant responses only, not mirror the user's prompts.
+- The session-start hook is the entry point for launching the UI and handing
+  it the active Antigravity conversation context.
+
+Implemented
+-----------
+- `cmd/mcp-server/main.go` registers a `get_status` MCP tool and serves it over
+  stdio. This is a connectivity stub, not a Linux diagnostic or AI service.
+- `hooks.json` enables the `SessionStart` hook.
+- `scripts/on-session-start.sh` reads the hook's JSON input, validates the
+  conversation ID and transcript path, starts the configured GUI process, and
+  emits `{}` on stdout to satisfy the hook protocol.
+- The launcher defaults to `build/bin/linux-mentor`. Set `LINUX_MENTOR_GUI` to
+  override that executable. The launcher passes `LINUX_MENTOR_CONVERSATION_ID`
+  and `LINUX_MENTOR_TRANSCRIPT_PATH` to the process environment.
+- Launcher output is written to
+  `${XDG_STATE_HOME:-~/.local/state}/linux-mentor/gui.log`; hook stdout is
+  reserved for JSON.
+
+Response flow and current limitation
+------------------------------------
+Antigravity hook documentation provides a `transcriptPath` in the common hook
+input. `PostInvocation` does not provide the generated response text directly.
+The intended read-only response path is therefore:
+
+  Antigravity writes conversation transcript
+      -> GUI watches/reads the active transcript
+      -> GUI renders assistant entries only
+
+The GUI executable and transcript reader do not exist in this repository yet.
+Until they are implemented and built at `build/bin/linux-mentor`, the startup
+hook reports the missing executable and no responses appear in a separate UI.
+The transcript's exact JSONL message schema must be verified before implementing
+the reader. Do not treat user entries as displayable assistant responses.
+
+Not implemented
+---------------
+- Wails/React UI, transcript tailing/parsing, and live response rendering.
+- Linux distribution detection and distribution-aware guidance.
+- Linux troubleshooting tools beyond the MCP status stub.
+- User-message submission from the GUI.
+- Packaging, installation, and a cross-distribution release process.
+
+Design constraints
+------------------
+- Keep MCP stdio protocol output separate from logs; never write diagnostics to
+  the MCP server's stdout.
+- Keep Antigravity hook stdout valid JSON. Launcher diagnostics go to stderr;
+  the detached GUI's output goes to its state log.
+- Treat the transcript as read-only input. Do not modify Antigravity's logs or
+  automatically run commands from transcript content.
+- Keep assistant-response display independent of the MCP server. The MCP server
+  provides tools to Antigravity; the transcript is the current candidate
+  transport from Antigravity to the UI.
+- Prefer a single local process and the existing transcript over introducing a
+  network service or forwarding all chat content through another API.
+
+Next implementation steps
+------------------------
+1. Build the Wails/React application and package its executable at the launch
+   path, or configure `LINUX_MENTOR_GUI`.
+2. Verify transcript event shapes on Antigravity CLI and implement a read-only
+   tailer that tolerates file creation and partial JSONL writes.
+3. Filter to assistant-authored responses and render new entries in the UI.
+4. Add tests for hook payload validation, launch behavior, and transcript
+   filtering.
+5. Implement Fedora/Ubuntu detection and the Socratic guidance workflow in the
+   MCP/server rules, with safe diagnostic behavior.

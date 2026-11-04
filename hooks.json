@@ -1,10 +1,10 @@
 {
   "linux-mentor-startup": {
-    "enabled": false,
+    "enabled": true,
     "SessionStart": [
       {
         "type": "command",
-        "command": "./scripts/on-session-start.sh",
+        "command": "bash ./scripts/on-session-start.sh",
         "timeout": 10
       }
     ]

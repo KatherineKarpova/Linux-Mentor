@@ -24,6 +24,9 @@ Current decisions
 - The UI should display assistant responses only, not mirror the user's prompts.
 - The session-start hook is the entry point for launching the UI and handing
   it the active Antigravity conversation context.
+- The frontend's `index.html` is only Vite's mount document embedded in the
+  Wails window. The product UI runs in the native desktop application's webview;
+  no standalone browser app or web server is part of the runtime.
 
 Implemented
 -----------
@@ -39,26 +42,29 @@ Implemented
 - Launcher output is written to
   `${XDG_STATE_HOME:-~/.local/state}/linux-mentor/gui.log`; hook stdout is
   reserved for JSON.
+- `cmd/desktop` is the Wails host. It embeds the React production assets and
+  exposes session context and transcript messages to the frontend.
+- The Go host watches the active transcript incrementally and exposes only
+  completed `PLANNER_RESPONSE` records from `MODEL`. The UI polls that bridge
+  and renders mentor responses without mirroring user input.
+- `scripts/build-desktop.sh` builds the React assets and packages the Wails
+  executable at the hook's default launch path.
 
-Response flow and current limitation
-------------------------------------
-Antigravity hook documentation provides a `transcriptPath` in the common hook
-input. `PostInvocation` does not provide the generated response text directly.
-The intended read-only response path is therefore:
+Response flow and limitations
+-----------------------------
+The read-only response path is:
 
   Antigravity writes conversation transcript
-      -> GUI watches/reads the active transcript
-      -> GUI renders assistant entries only
+      -> Wails host reads completed JSONL records
+      -> React UI polls the Go bridge and renders model responses
 
-The GUI executable and transcript reader do not exist in this repository yet.
-Until they are implemented and built at `build/bin/linux-mentor`, the startup
-hook reports the missing executable and no responses appear in a separate UI.
-The transcript's exact JSONL message schema must be verified before implementing
-the reader. Do not treat user entries as displayable assistant responses.
+The transcript schema is Antigravity-specific. The current reader intentionally
+filters to completed `PLANNER_RESPONSE` records whose source is `MODEL`.
+Keep this mapping covered by tests if Antigravity changes its transcript format.
+The executable must be built before the hook can launch it.
 
 Not implemented
 ---------------
-- Wails/React UI, transcript tailing/parsing, and live response rendering.
 - Linux distribution detection and distribution-aware guidance.
 - Linux troubleshooting tools beyond the MCP status stub.
 - User-message submission from the GUI.
@@ -80,12 +86,8 @@ Design constraints
 
 Next implementation steps
 ------------------------
-1. Build the Wails/React application and package its executable at the launch
-   path, or configure `LINUX_MENTOR_GUI`.
-2. Verify transcript event shapes on Antigravity CLI and implement a read-only
-   tailer that tolerates file creation and partial JSONL writes.
-3. Filter to assistant-authored responses and render new entries in the UI.
-4. Add tests for hook payload validation, launch behavior, and transcript
-   filtering.
-5. Implement Fedora/Ubuntu detection and the Socratic guidance workflow in the
-   MCP/server rules, with safe diagnostic behavior.
+1. Implement Fedora/Ubuntu detection and distribution-aware Socratic guidance
+   in the MCP/server rules, with safe diagnostic behavior.
+2. Verify transcript event shapes against supported Antigravity CLI versions
+   and update the reader mapping when required.
+3. Add packaged installation and release workflows for supported Linux systems.

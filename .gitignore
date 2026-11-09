@@ -7,6 +7,7 @@
 *.dll
 *.so
 *.dylib
+*.linux-mentor-mcp
 
 # Test binary, built with `go test -c`
 *.test
@@ -50,3 +51,7 @@ build/
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Go toolchain tarball
+go*.linux-amd64.tar.gz
+*.tar.gz

@@ -39,7 +39,14 @@ function App() {
         ]);
         if (!active) return;
         if (sessionInfo) setConversationId(sessionInfo.conversationId);
-        if (latestMessages) setMessages(latestMessages);
+        if (latestMessages) {
+          setMessages((prev) =>
+            prev.length === latestMessages.length &&
+            prev[prev.length - 1]?.id === latestMessages[latestMessages.length - 1]?.id
+              ? prev
+              : latestMessages,
+          );
+        }
       } catch (error) {
         console.error("could not load the mentor session", error);
       }
@@ -76,12 +83,12 @@ function App() {
           <span className="note-icon" aria-hidden="true">
             <LightbulbIcon />
           </span>
-          <p>Learn by exploring. Your mentor will guide you with questions, not do the work for you.</p>
+          <p>Learn through inquisition. Your mentor will give hints and questions, not do the work for you.</p>
         </div>
 
         <div className="sidebar-footer">
           <span className="linux-indicator" />
-          <span>Linux learning companion</span>
+          <span>Linux CLI Mentor</span>
         </div>
       </aside>
 
@@ -111,7 +118,7 @@ function App() {
               </p>
               <div className="principle">
                 <span className="principle-line" />
-                <span>Understand the why, not just the command.</span>
+                <span>Understand the why and how.</span>
               </div>
             </div>
           ) : (
@@ -122,7 +129,7 @@ function App() {
                     <TerminalIcon />
                   </div>
                   <div className="message-content">
-                    <span className="message-author">Linux Mentor</span>
+                    <span className="message-author">Linux CLI Mentor</span>
                     <p>{message.content}</p>
                   </div>
                 </article>

@@ -21,5 +21,11 @@ npm run build
 
 mkdir -p "$(dirname "$output")"
 cd "$plugin_root"
-go build -o "$output" ./cmd/desktop
-printf 'linux-mentor: desktop application built at %s\n' "$output"
+
+# wails needs these build tags; a plain `go build` produces a binary that won't start.
+tags="desktop,production"
+if pkg-config --exists webkit2gtk-4.1 && ! pkg-config --exists webkit2gtk-4.0; then
+  tags="$tags,webkit2_41"
+fi
+go build -tags "$tags" -o "$output" ./cmd/desktop
+printf 'linux-mentor: desktop application built at %s (tags: %s)\n' "$output" "$tags"

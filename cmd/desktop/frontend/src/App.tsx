@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type SessionInfo = {
   conversationId: string;
@@ -21,6 +21,27 @@ declare global {
       };
     };
   }
+}
+
+// make it easier to extract the commands practiced and the most relevant/recent questions asked
+
+export function extractCommands(text: string): string[] {
+  const found: string[] = [];
+  for (const block of text.matchAll(/```[a-z]*\n([\s\S]*?)```/g)) {
+    for (const line of block[1].split("\n")) {
+      const cleaned = line.trim().replace(/^\$\s*/, "");
+      if (cleaned && !cleaned.startsWith("#")) found.push(cleaned);
+    }
+  }
+  for (const inline of text.matchAll(/`([^`\n]+)`/g)) {
+    const cleaned = inline[1].trim();
+    if (/^[a-z][\w.-]*( |$)/i.test(cleaned) && cleaned.length <= 120) found.push(cleaned);
+  }
+  return found;
+}
+
+export function extractQuestions(text: string): string[] {
+  return (text.match(/[^.!?\n]+\?/g) ?? []).map((q) => q.trim());
 }
 
 function App() {
@@ -59,6 +80,15 @@ function App() {
       window.clearInterval(interval);
     };
   }, []);
+  const commands = useMemo(
+  () => [...new Set(messages.flatMap((m) => extractCommands(m.content)))],
+  [messages],
+  );
+  const questions = useMemo(
+    () => messages.flatMap((m) => extractQuestions(m.content)).slice(-5),
+    [messages],
+  );
+  const latest = messages[messages.length - 1];
 
   return (
     <main className="app-shell">
@@ -77,6 +107,31 @@ function App() {
             <span className="state-dot" />
             {conversationId ? "Connected to Antigravity" : "Waiting for Antigravity"}
           </span>
+        </div>
+                <div className="companion">
+          <h2>Commands to try</h2>
+          {commands.length === 0 ? (
+            <p className="muted">None yet.</p>
+          ) : (
+            <ul>
+              {commands.map((c) => (
+                <li key={c}>
+                  <code>{c}</code>
+                  <button onClick={() => navigator.clipboard?.writeText(c)}>Copy</button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <h2>Think about</h2>
+          {questions.length === 0 ? (
+            <p className="muted">No questions yet.</p>
+          ) : (
+            <ul>
+              {questions.map((q) => (
+                <li key={q}>{q}</li>
+              ))}
+            </ul>
+          )}
         </div>
 
         <div className="sidebar-note">
@@ -123,7 +178,7 @@ function App() {
             </div>
           ) : (
             <div className="message-list" aria-live="polite">
-              {messages.map((message) => (
+              {(latest ? [latest] : []).map((message) => (
                 <article className="mentor-message" key={message.id}>
                   <div className="message-avatar" aria-hidden="true">
                     <TerminalIcon />

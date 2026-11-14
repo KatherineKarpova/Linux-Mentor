@@ -405,3 +405,12 @@ button {
     scroll-behavior: auto !important;
   }
 }
+
+.companion { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; min-height: 0; overflow: auto; }
+.companion h2 { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; margin: 8px 0 4px; opacity: 0.7; }
+.companion ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.companion li { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
+.companion code { word-break: break-all; font-size: 12px; }
+.companion button { flex: none; font-size: 11px; cursor: pointer; }
+.companion .muted { opacity: 0.6; font-size: 12px; margin: 0; }
+.message-content p { white-space: pre-wrap; }

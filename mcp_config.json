@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "linux-mentor": {
+      "command": "linux-mentor-mcp"
+    }
+  }
+}

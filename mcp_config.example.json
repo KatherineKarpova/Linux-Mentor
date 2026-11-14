@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "linux-mentor": {
-      "command": "/home/katkarpova/projects/Linux-Mentor/linux-mentor-mcp"
-    }
-  }
-}

@@ -4,14 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"sort"
 )
 
 type statusInput struct{}
@@ -44,7 +44,7 @@ type ReviewItem struct {
 	CommandAccuracy  string    `json:"command_accuracy,omitempty"`
 	ExplanationDepth string    `json:"explanation_depth,omitempty"`
 	Notes            string    `json:"notes,omitempty"`
-	Status       	 string    `json:"status"`   // exactly one of the Status constants below
+	Status           string    `json:"status"`   // exactly one of the Status constants below
 	Attempts         int       `json:"attempts"` // total graded answers for this concept
 	Misses           int       `json:"misses"`   // wrong answers since the last correct one
 }
@@ -144,7 +144,7 @@ func initProgressStore() {
 		var raw map[string]*ReviewItem
 		if err := json.Unmarshal(data, &raw); err == nil && raw != nil {
 			store.Items = raw
-			for key,item := range store.Items {
+			for key, item := range store.Items {
 				if item == nil { // a JSON null would otherwise crash below
 					delete(store.Items, key)
 					continue
@@ -156,11 +156,11 @@ func initProgressStore() {
 					item.Attempts = 1
 				}
 			}
-		}   
-		} else if os.IsNotExist(err) {
-			_ = store.save()
 		}
+	} else if os.IsNotExist(err) {
+		_ = store.save()
 	}
+}
 
 func (s *ProgressStore) save() error {
 	data, err := json.MarshalIndent(s.Items, "", "  ")
@@ -330,7 +330,7 @@ func recordEvaluation(
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	concept := strings.TrimSpace(input.Concept)
+	concept := strings.ToLower(strings.TrimSpace(input.Concept))
 	if concept == "" {
 		concept = "general-linux"
 	}

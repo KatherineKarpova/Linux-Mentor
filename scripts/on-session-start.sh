@@ -2,8 +2,24 @@
 # sessionstart hook for linux-mentor.
 set -euo pipefail
 
+if [[ -n "${LINUX_MENTOR_EMBEDDED:-}" ]]; then
+  cat >/dev/null
+  printf '{}\n'
+  exit 0
+fi
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/linux-mentor"
+if ! mkdir -p "$state_dir"; then
+  printf 'linux-mentor: cannot create state directory: %s\n' "$state_dir" >&2
+  printf '{}\n'
+  exit 1
+fi
+
+printf '%s hook fired, cwd=%s\n' "$(date -Is)" "$PWD" >> "$state_dir/hook.log"
+
 # resolve paths relative to this script instead of the host's current directory.
-plugin_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
 gui="${LINUX_MENTOR_GUI:-$plugin_root/build/bin/linux-mentor}"
 if [[ "$gui" != /* ]]; then
   gui="$plugin_root/$gui"
@@ -42,14 +58,6 @@ transcript_path="${hook_fields[1]}"
 # fail clearly instead of pretending the ui started when it has not been built.
 if [[ ! -x "$gui" ]]; then
   printf 'linux-mentor: GUI executable not found: %s\n' "$gui" >&2
-  printf '{}\n'
-  exit 1
-fi
-
-# keep the detached ui's logs out of the hook's json output.
-state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/linux-mentor"
-if ! mkdir -p "$state_dir"; then
-  printf 'linux-mentor: cannot create state directory: %s\n' "$state_dir" >&2
   printf '{}\n'
   exit 1
 fi

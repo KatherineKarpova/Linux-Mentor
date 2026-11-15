@@ -66,9 +66,36 @@ The executable must be built before the hook can launch it.
 Not implemented
 ---------------
 - Linux distribution detection and distribution-aware guidance.
-- Linux troubleshooting tools beyond the MCP status stub.
-- User-message submission from the GUI.
 - Packaging, installation, and a cross-distribution release process.
+
+Offline Documentation & Spaced Repetition Design
+------------------------------------------------
+1. Precompiled Offline Documentation:
+   - Fetched dataset stored at `${XDG_DATA_HOME:-~/.local/share}/linux-mentor/docs.db`.
+   - SQLite FTS5 virtual table indexing Ubuntu and Fedora man pages, package
+     management guides, system administration handbooks, and troubleshooting docs.
+   - Read-only search queried by the MCP server (`search_docs`) before generating responses.
+
+2. Student Progress & Spaced Repetition:
+   - Stored locally at `${XDG_STATE_HOME:-~/.local/state}/linux-mentor/progress.db`.
+   - Tracks questions asked, user answers, command accuracy, and explanation depth.
+   - Spaced repetition intervals:
+     * Stage 1: Review in 7 days upon first correct demonstration.
+     * Stage 2: Review in 2 months (60 days) on subsequent success.
+     * Stage 3: Review in 3 months (90 days) on subsequent success.
+     * Failure/Struggle: Fall back one stage and flag as an active area to work on.
+   - Prevents redundant questioning and tailors Socratic guidance.
+
+3. Desktop UI as Study Guide & Reference Sheet:
+   - Desktop UI in `cmd/desktop` serves as a learning companion and study guide.
+   - Surfaces practiced commands cheat sheet, mastered concepts, active review queue,
+     and flagged areas for improvement.
+
+4. MCP Server Tools (`cmd/mcp-server/main.go`):
+   - `get_status`: Server health check.
+   - `search_docs`: Offline documentation search across Ubuntu/Fedora.
+   - `get_learning_status`: Active review queue and mastered topics.
+   - `record_evaluation`: Record command accuracy and explanation depth milestones.
 
 Design constraints
 ------------------
@@ -86,8 +113,10 @@ Design constraints
 
 Next implementation steps
 ------------------------
-1. Implement Fedora/Ubuntu detection and distribution-aware Socratic guidance
-   in the MCP/server rules, with safe diagnostic behavior.
-2. Verify transcript event shapes against supported Antigravity CLI versions
-   and update the reader mapping when required.
-3. Add packaged installation and release workflows for supported Linux systems.
+1. Implement MCP tool handlers in `cmd/mcp-server/main.go` for `search_docs`,
+   `get_learning_status`, and `record_evaluation`.
+2. Connect `progress.db` and `docs.db` SQLite storage.
+3. Update `cmd/desktop/frontend` React study guide UI to render review queues,
+   reference sheets, and improvement areas.
+4. Verify transcript event shapes against supported Antigravity CLI versions.
+5. Add packaged installation and release workflows for supported Linux systems.

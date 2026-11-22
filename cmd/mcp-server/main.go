@@ -1,10 +1,11 @@
+// this file defines tools the mcp server can call to retrieve documentation and track a user's learning progress 
+
 package main
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,14 +13,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-type statusInput struct{}
-
+// input and output types for the server connection check
+type statusInput struct{}	
 type statusOutput struct {
 	Message string `json:"message"`
 }
 
+// return a message confirming that the mcp server is connected
 func getStatus(
 	ctx context.Context,
 	req *mcp.CallToolRequest,
@@ -30,91 +33,125 @@ func getStatus(
 	}, nil
 }
 
-// ReviewItem models spaced repetition progress for a single concept or command.
-// Intervals:
-// Stage 1: 7 days
-// Stage 2: 2 months (approx 60 days)
-// Stage 3: 3 months (approx 90 days)
-// On failure: fall back to previous stage.
+// stores learning progress and review scheduling for one linux concept
 type ReviewItem struct {
-	Concept          string    `json:"concept"`
-	Stage            int       `json:"stage"`
-	LastReviewed     time.Time `json:"last_reviewed"`
-	NextReview       time.Time `json:"next_review"`
-	CommandAccuracy  string    `json:"command_accuracy,omitempty"`
-	ExplanationDepth string    `json:"explanation_depth,omitempty"`
-	Notes            string    `json:"notes,omitempty"`
-	Status           string    `json:"status"`   // exactly one of the Status constants below
-	Attempts         int       `json:"attempts"` // total graded answers for this concept
-	Misses           int       `json:"misses"`   // wrong answers since the last correct one
+	Concept				string		`json:"concept"`
+	Stage				int       	`json:"stage"`			// tracks the interval out of 3 for the status category
+	LastMisses       	int       	`json:"last_misses"` 	// wrong answers before the last correct answer, capped at 2 (0 = clean)
+	LastReviewed     	time.Time 	`json:"last_reviewed"`
+	NextReview       	time.Time 	`json:"next_review"`	// the concept is eligible to come up again after this time
+	CommandAccuracy  	string   	`json:"command_accuracy,omitempty"`
+	ExplanationDepth 	string    	`json:"explanation_depth,omitempty"`
+	Notes            	string    	`json:"notes,omitempty"`
+	Status           	string    	`json:"status"`   
+	Attempts         	int       	`json:"attempts"` // total graded answers for this concept
+	CurrentMisses       int       	`json:"current_misses"`   // wrong answers since the last correct answer
 }
 
-// Every concept is in exactly one of these at a time.
+// learning statuses based on mistake before a correct answer
 const (
-	StatusMastered  = "mastered"  // correct on the first try
-	StatusReview    = "review"    // wrong once, then correct: spaced review queue
-	StatusReinforce = "reinforce" // wrong twice or more, or still unresolved
+	StatusMastered  = "mastered"  // correct with 0 wrong answers first
+	StatusLearning  = "learning"  // first-try successes so far, fewer than three in a row
+	StatusReview    = "review"    // 1 wrong answer, then correct
+	StatusReinforce = "reinforce" // 2 or more wrong answers, then correct
 )
 
-func statusFromStage(stage int) string {
-	switch {
-	case stage >= 3:
-		return StatusMastered
-	case stage <= 0:
-		return StatusReinforce
-	default:
-		return StatusReview
-	}
+const maxStage = 3
+
+// intervalDays[bucket][stage-1] is how many days to wait before the concept is eligible again.
+// bucket 0 = correct with no wrong answers first, 1 = one wrong answer first, 2 = two or more.
+// within a bucket, each stage doubles the one before it.
+var intervalDays = [3][maxStage]int{
+	{14, 28, 56},
+	{2, 4, 8},
+	{1, 2, 4},
 }
 
-func nextReviewFor(stage int, now time.Time) time.Time {
-	switch stage {
-	case 0:
-		return now.AddDate(0, 0, 1) // reinforce: try again tomorrow
-	case 1:
-		return now.AddDate(0, 0, 7)
-	case 2:
-		return now.AddDate(0, 2, 0)
-	default:
-		return now.AddDate(0, 3, 0)
+// caps wrong answers at 2
+func missBucket(misses int) int {
+	if misses > 2 {
+		return 2
 	}
+	return misses
+}
+
+// picks the status the learner sees
+func statusFor(bucket, stage int) string {
+	switch bucket {
+	case 0:
+		if stage >= maxStage {
+			return StatusMastered
+		}
+		return StatusLearning
+	case 1:
+		return StatusReview
+	default:
+		return StatusReinforce
+	}
+} 
+
+// calculate the next review date based on the assigned stage
+func nextReviewFor(bucket, stage int, now time.Time) time.Time {
+	return now.AddDate(0, 0, intervalDays[bucket][stage-1])
+}
+
+// check if a concept is eligble for another review
+func shouldReview(item *ReviewItem, now time.Time) bool {
+	if item == nil {
+		return false
+	}
+	return !now.Before(item.NextReview)
+}
+
+func normalizeConcept(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return "general-linux"
+	}
+	return name
+}
+
+func (s *ProgressStore) getOrCreateItem(concept string) *ReviewItem {
+	concept = strings.ToLower(strings.TrimSpace(concept))
+	item, exists := store.Items[concept]
+	if !exists {
+		item = &ReviewItem{Concept: concept}
+		store.Items[concept] = item
+	}
+	return item 
 }
 
 // applyEvaluation updates one concept after the learner answers a question.
 func applyEvaluation(item *ReviewItem, passed bool, now time.Time) {
-	firstAttempt := item.Attempts == 0
+
 	item.Attempts++
 	item.LastReviewed = now
 
 	if !passed {
-		item.Misses++
+		// keep counting wrong answers until the learner gets it right.
+		// the stage and last result stay as they were until then.
+		item.CurrentMisses++
 		item.Stage = 0
-		item.Status = StatusReinforce // unresolved: needs work until answered correctly
+		item.Status = StatusReinforce // unresolved, needs work until answered correctly
 		item.NextReview = now
 		return
 	}
 
-	misses := item.Misses
-	item.Misses = 0
+	bucket := missBucket(item.CurrentMisses)
+	item.CurrentMisses = 0
 
-	switch {
-	case firstAttempt:
-		item.Stage = 3
-		item.Status = StatusMastered
-	case misses == 0:
-		// a clean later review moves the concept up one stage
-		if item.Stage < 3 {
+	if item.Stage >= 1 && bucket == item.LastMisses {
+		// the same kind of result again: move up a stage, up to the limit
+		if item.Stage < maxStage {
 			item.Stage++
 		}
-		item.Status = statusFromStage(item.Stage)
-	case misses == 1:
+	} else {
+		// a different kind of result (or the first one): restart at stage 1
 		item.Stage = 1
-		item.Status = StatusReview
-	default:
-		item.Stage = 0
-		item.Status = StatusReinforce
 	}
-	item.NextReview = nextReviewFor(item.Stage, now)
+	item.LastMisses = bucket
+	item.Status = statusFor(bucket, item.Stage)
+	item.NextReview = nextReviewFor(bucket, item.Stage, now)
 }
 
 type ProgressStore struct {
@@ -143,24 +180,17 @@ func initProgressStore() {
 	if err == nil {
 		var raw map[string]*ReviewItem
 		if err := json.Unmarshal(data, &raw); err == nil && raw != nil {
-			store.Items = raw
-			for key, item := range store.Items {
+			for key, item := range raw {
 				if item == nil { // a JSON null would otherwise crash below
-					delete(store.Items, key)
+					delete(raw, key)
 					continue
 				}
-				if item.Status == "" {
-					item.Status = statusFromStage(item.Stage)
-				}
-				if item.Attempts == 0 && !item.LastReviewed.IsZero() {
-					item.Attempts = 1
-				}
+				store.Items = raw
 			}
-		}
 	} else if os.IsNotExist(err) {
 		_ = store.save()
 	}
-}
+}}
 
 func (s *ProgressStore) save() error {
 	data, err := json.MarshalIndent(s.Items, "", "  ")
@@ -262,15 +292,20 @@ type learningStatusInput struct {
 }
 
 type learningStatusOutput struct {
-	DueForReview   []string `json:"due_for_review"`
-	Mastered       []string `json:"mastered"`
-	AreasToWorkOn  []string `json:"areas_to_work_on"`
-	TotalPracticed int      `json:"total_practiced"`
-	Message        string   `json:"message"`
+	DueForReview   	[]string 	`json:"due_for_review"`	// eligible if the topic comes up naturally
+	Mastered       	[]string 	`json:"mastered"`
+	AreasToWorkOn  	[]string 	`json:"areas_to_work_on"`
+	TotalPracticed 	int      	`json:"total_practiced"`
+	Message        	string   	`json:"message"`
+	ConceptFound	bool 		`json:"concept_found"`
+	OkForReview		bool 		`json:"ok_for_review"`
+	Status         	string   	`json:"status,omitempty"`
+	Stage          	int      	`json:"stage,omitempty"`
+	NextReview     	string   	`json:"next_review,omitempty"`
 }
 
-func getLearningStatus(
-	ctx context.Context,
+// 
+func getLearningStatus(ctx context.Context,
 	req *mcp.CallToolRequest,
 	input learningStatusInput,
 ) (*mcp.CallToolResult, learningStatusOutput, error) {
@@ -278,32 +313,51 @@ func getLearningStatus(
 	defer store.mu.RUnlock()
 
 	now := time.Now()
-	var due, mastered, areas []string
+	// empty slices, not nil, so the tool's JSON output has arrays and never null
+	out := learningStatusOutput{
+		DueForReview:  []string{},
+		Mastered:      []string{},
+		AreasToWorkOn: []string{},
+	}
 
+	// one concept: tell the mentor whether it is eligible to come up
+	if concept := strings.ToLower(strings.TrimSpace(input.Concept)); concept != "" {
+		item, exists := store.Items[concept]
+		if !exists {
+			out.Message = fmt.Sprintf("'%s' has not been practiced yet", concept)
+			return nil, out, nil
+		}
+		out.ConceptFound = true
+		out.OkForReview = shouldReview(item, now)
+		out.Status = item.Status
+		out.Stage = item.Stage
+		out.NextReview = item.NextReview.Format("2006-01-02")
+		out.Message = fmt.Sprintf("'%s' is %s (stage %d), eligible after %s",
+			concept, item.Status, item.Stage, out.NextReview)
+		return nil, out, nil
+	}
+
+	// overall summary
 	for concept, item := range store.Items {
-		switch item.Status {
-		case StatusMastered:
-			mastered = append(mastered, concept)
-		case StatusReview:
-			if !now.Before(item.NextReview) {
-				due = append(due, fmt.Sprintf("%s (stage %d)", concept, item.Stage))
-			}
-		case StatusReinforce:
-			areas = append(areas, concept)
+		if item.Status == StatusMastered {
+			out.Mastered = append(out.Mastered, concept)
+		}
+		if item.Status == StatusReinforce {
+			out.AreasToWorkOn = append(out.AreasToWorkOn, concept)
+		}
+		if shouldReview(item, now) {
+			out.DueForReview = append(out.DueForReview, fmt.Sprintf("%s (stage %d)", concept, item.Stage))
 		}
 	}
-	sort.Strings(due)
-	sort.Strings(mastered)
-	sort.Strings(areas)
+	// sort concepts alhabetically for consistency
+	sort.Strings(out.DueForReview)
+	sort.Strings(out.Mastered)
+	sort.Strings(out.AreasToWorkOn)
 
-	msg := fmt.Sprintf("Tracking %d concepts (%d mastered, %d due for spaced review)", len(store.Items), len(mastered), len(due))
-	return nil, learningStatusOutput{
-		DueForReview:   due,
-		Mastered:       mastered,
-		AreasToWorkOn:  areas,
-		TotalPracticed: len(store.Items),
-		Message:        msg,
-	}, nil
+	out.TotalPracticed = len(store.Items)
+	out.Message = fmt.Sprintf("Tracking %d concepts (%d mastered, %d eligible if they come up naturally)",
+		len(store.Items), len(out.Mastered), len(out.DueForReview))
+	return nil, out, nil
 }
 
 type recordEvaluationInput struct {
@@ -330,16 +384,9 @@ func recordEvaluation(
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	concept := strings.ToLower(strings.TrimSpace(input.Concept))
-	if concept == "" {
-		concept = "general-linux"
-	}
-
-	item, exists := store.Items[concept]
-	if !exists {
-		item = &ReviewItem{Concept: concept}
-		store.Items[concept] = item
-	}
+	
+	concept := normalizeConcept(input.Concept)
+	item := store.getOrCreateItem(concept)
 
 	now := time.Now()
 	item.CommandAccuracy = input.CommandAccuracy
@@ -348,6 +395,10 @@ func recordEvaluation(
 	applyEvaluation(item, input.Passed, now)
 
 	_ = store.save()
+
+	if err := store.save(); err != nil {
+		return nil, recordEvaluationOutput{}, err
+	}
 
 	msg := fmt.Sprintf("Recorded evaluation for '%s'. Stage is now %d (next review: %s)",
 		concept, item.Stage, item.NextReview.Format("2006-01-02"))

@@ -228,7 +228,7 @@ function App() {
           <span className="note-icon" aria-hidden="true">
             <LightbulbIcon />
           </span>
-          <p>Spaced repetition schedules reviews at 7 days, 2 months, and 3 months.</p>
+          <p>Reviews concepts that naturally come up based on your progress.</p>
         </div>
 
         <div className="sidebar-footer">

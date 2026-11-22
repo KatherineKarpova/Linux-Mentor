@@ -8,13 +8,14 @@ import (
 
 var testNow = time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 
-// gradeSequence applies a series of graded answers to a brand-new concept.
-func gradeSequence(concept string, results ...bool) *ReviewItem {
-	item := &ReviewItem{Concept: concept}
+func grade(item *ReviewItem, results ...bool) {
 	for _, passed := range results {
 		applyEvaluation(item, passed, testNow)
 	}
-	return item
+}
+
+func daysUntilNext(item *ReviewItem) int {
+	return int(item.NextReview.Sub(testNow).Hours() / 24)
 }
 
 func sameStrings(a, b []string) bool {
@@ -29,92 +30,100 @@ func sameStrings(a, b []string) bool {
 	return true
 }
 
-// --- the three rules --------------------------------------------------------
-
-func TestApplyEvaluationRules(t *testing.T) {
-	tests := []struct {
-		name       string
-		results    []bool
-		wantStatus string
-		wantStage  int
-		wantNext   time.Time
-	}{
-		{"correct right away", []bool{true}, StatusMastered, 3, testNow.AddDate(0, 3, 0)},
-		{"wrong once, then correct", []bool{false, true}, StatusReview, 1, testNow.AddDate(0, 0, 7)},
-		{"wrong twice, then correct", []bool{false, false, true}, StatusReinforce, 0, testNow.AddDate(0, 0, 1)},
-		{"wrong three times, then correct", []bool{false, false, false, true}, StatusReinforce, 0, testNow.AddDate(0, 0, 1)},
-		{"wrong once, still unresolved", []bool{false}, StatusReinforce, 0, testNow},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			item := gradeSequence("chmod", tc.results...)
-			if item.Status != tc.wantStatus {
-				t.Errorf("status = %q, want %q", item.Status, tc.wantStatus)
-			}
-			if item.Stage != tc.wantStage {
-				t.Errorf("stage = %d, want %d", item.Stage, tc.wantStage)
-			}
-			if !item.NextReview.Equal(tc.wantNext) {
-				t.Errorf("next review = %v, want %v", item.NextReview, tc.wantNext)
-			}
-		})
-	}
+type step struct {
+	stage  int
+	days   int
+	status string
 }
 
-// --- counters ---------------------------------------------------------------
-
-func TestMissesResetAfterACorrectAnswer(t *testing.T) {
-	item := gradeSequence("chmod", false, false, true)
-	if item.Misses != 0 {
-		t.Errorf("misses = %d, want 0 after a correct answer", item.Misses)
-	}
-	if item.Attempts != 3 {
-		t.Errorf("attempts = %d, want 3", item.Attempts)
-	}
-}
-
-// --- what happens on later reviews ------------------------------------------
-
-func TestCleanLaterReviewsClimbTheStages(t *testing.T) {
-	item := &ReviewItem{Concept: "grep", Stage: 1, Attempts: 1, Status: StatusReview}
-
-	applyEvaluation(item, true, testNow)
-	if item.Stage != 2 || item.Status != StatusReview || !item.NextReview.Equal(testNow.AddDate(0, 2, 0)) {
-		t.Fatalf("after first clean review: stage %d, status %q, next %v", item.Stage, item.Status, item.NextReview)
-	}
-
-	applyEvaluation(item, true, testNow)
-	if item.Stage != 3 || item.Status != StatusMastered || !item.NextReview.Equal(testNow.AddDate(0, 3, 0)) {
-		t.Fatalf("after second clean review: stage %d, status %q, next %v", item.Stage, item.Status, item.NextReview)
-	}
-}
-
-func TestReinforcedConceptRecoversAfterACleanReview(t *testing.T) {
-	// wrong twice then correct lands in Areas to Work On; a later clean answer moves it to the queue
-	item := gradeSequence("ls -la", false, false, true, true)
-	if item.Status != StatusReview || item.Stage != 1 {
-		t.Fatalf("status %q stage %d, want review at stage 1", item.Status, item.Stage)
-	}
-}
-
-func TestMasteredConceptThatIsMissedLaterNeedsReinforcement(t *testing.T) {
-	item := gradeSequence("chmod", true)
-	applyEvaluation(item, false, testNow)
-	if item.Status != StatusReinforce || item.Stage != 0 || item.Misses != 1 || item.Attempts != 2 {
-		t.Fatalf("got status %q stage %d misses %d attempts %d", item.Status, item.Stage, item.Misses, item.Attempts)
-	}
-}
-
-func TestStatusFromStage(t *testing.T) {
-	tests := map[int]string{-1: StatusReinforce, 0: StatusReinforce, 1: StatusReview, 2: StatusReview, 3: StatusMastered, 4: StatusMastered}
-	for stage, want := range tests {
-		if got := statusFromStage(stage); got != want {
-			t.Errorf("statusFromStage(%d) = %q, want %q", stage, got, want)
+func runSteps(t *testing.T, answers []bool, steps []step) {
+	t.Helper()
+	item := &ReviewItem{Concept: "chmod"}
+	for i, want := range steps {
+		grade(item, answers...)
+		if item.Stage != want.stage || item.Status != want.status || daysUntilNext(item) != want.days {
+			t.Fatalf("round %d: stage %d, status %q, %d days; want stage %d, status %q, %d days",
+				i+1, item.Stage, item.Status, daysUntilNext(item), want.stage, want.status, want.days)
 		}
 	}
 }
 
-// --- the tools, using a temporary progress file -----------------------------
+func TestCorrectImmediatelyClimbsToMastery(t *testing.T) {
+	runSteps(t, []bool{true}, []step{
+		{1, 14, StatusLearning},
+		{2, 28, StatusLearning},
+		{3, 56, StatusMastered},
+		{3, 56, StatusMastered}, // more correct answers maintain mastery
+	})
+}
+
+func TestWrongOnceThenCorrect(t *testing.T) {
+	runSteps(t, []bool{false, true}, []step{
+		{1, 2, StatusReview},
+		{2, 4, StatusReview},
+		{3, 8, StatusReview},
+		{3, 8, StatusReview}, // progression stops at three stages
+	})
+}
+
+func TestWrongTwiceOrMoreThenCorrect(t *testing.T) {
+	runSteps(t, []bool{false, false, true}, []step{
+		{1, 1, StatusReinforce},
+		{2, 2, StatusReinforce},
+		{3, 4, StatusReinforce},
+	})
+	runSteps(t, []bool{false, false, false, true}, []step{
+		{1, 1, StatusReinforce}, // three wrong answers still count as "twice or more"
+	})
+}
+
+func TestChangingCategoryResetsTheStage(t *testing.T) {
+	item := &ReviewItem{Concept: "chmod"}
+	grade(item, true, true) // clean, stage 2
+	grade(item, false, true) // wrong once: new category, back to stage 1
+	if item.Stage != 1 || item.Status != StatusReview || daysUntilNext(item) != 2 {
+		t.Fatalf("got stage %d, status %q, %d days", item.Stage, item.Status, daysUntilNext(item))
+	}
+	grade(item, true) // clean again: another change, stage 1 with the clean interval
+	if item.Stage != 1 || item.Status != StatusLearning || daysUntilNext(item) != 14 {
+		t.Fatalf("got stage %d, status %q, %d days", item.Stage, item.Status, daysUntilNext(item))
+	}
+}
+
+func TestAMissBreaksTheMasteryStreak(t *testing.T) {
+	item := &ReviewItem{Concept: "grep"}
+	grade(item, true, true)  // two first-try successes
+	grade(item, false, true) // a miss resets the streak
+	grade(item, true, true)  // two clean answers are not enough yet
+	if item.Status == StatusMastered {
+		t.Fatal("mastered after only two clean answers following a miss")
+	}
+	grade(item, true) // the third consecutive first-try success
+	if item.Status != StatusMastered {
+		t.Fatalf("status = %q, want mastered after three clean answers in a row", item.Status)
+	}
+}
+
+func TestUnresolvedMissNeedsReinforcementAndIsEligibleNow(t *testing.T) {
+	item := &ReviewItem{Concept: "ls -la"}
+	grade(item, false)
+	if item.Status != StatusReinforce || item.CurrentMisses != 1 {
+		t.Fatalf("status %q, misses %d", item.Status, item.CurrentMisses)
+	}
+	if !shouldReview(item, testNow) {
+		t.Fatal("an unresolved concept should be eligible immediately")
+	}
+}
+
+func TestMissCounterResetsAfterACorrectAnswer(t *testing.T) {
+	item := &ReviewItem{Concept: "chmod"}
+	grade(item, false, false, true)
+	if item.CurrentMisses != 0 || item.Attempts != 3 {
+		t.Fatalf("misses %d, attempts %d, want 0 and 3", item.CurrentMisses, item.Attempts)
+	}
+}
+
+// --- the tools, using a temporary progress file ---
 
 func newTestStore(t *testing.T) {
 	t.Helper()
@@ -129,7 +138,7 @@ func record(t *testing.T, concept string, passed bool) {
 		Passed:  passed,
 	})
 	if err != nil || !out.Success {
-		t.Fatalf("recordEvaluation(%q, %v) failed: success=%v err=%v", concept, passed, out.Success, err)
+		t.Fatalf("recordEvaluation(%q, %v): success=%v err=%v", concept, passed, out.Success, err)
 	}
 }
 
@@ -139,11 +148,10 @@ func TestRecordEvaluationNormalizesConceptNames(t *testing.T) {
 	record(t, "chmod", true)
 
 	if len(store.Items) != 1 {
-		t.Fatalf("got %d concepts, want 1 (names should be trimmed and lower-cased)", len(store.Items))
+		t.Fatalf("got %d concepts, want 1", len(store.Items))
 	}
-	item := store.Items["chmod"]
-	if item == nil || item.Attempts != 2 {
-		t.Fatalf("expected one concept named chmod with 2 attempts, got %+v", item)
+	if item := store.Items["chmod"]; item == nil || item.Attempts != 2 || item.Stage != 2 {
+		t.Fatalf("got %+v, want chmod with 2 attempts at stage 2", item)
 	}
 }
 
@@ -155,16 +163,15 @@ func TestProgressSurvivesARestart(t *testing.T) {
 	initProgressStore() // reload from the file the server just wrote
 
 	item := store.Items["grep"]
-	if item == nil {
-		t.Fatal("grep was not saved to disk")
-	}
-	if item.Status != StatusReview || item.Stage != 1 || item.Attempts != 2 {
-		t.Fatalf("after reload: status %q stage %d attempts %d", item.Status, item.Stage, item.Attempts)
+	if item == nil || item.Status != StatusReview || item.Stage != 1 {
+		t.Fatalf("after reload: %+v", item)
 	}
 }
 
-func TestLearningStatusListsAreDisjoint(t *testing.T) {
+func TestLearningStatusListsAndEligibility(t *testing.T) {
 	newTestStore(t)
+	record(t, "chmod", true)
+	record(t, "chmod", true)
 	record(t, "chmod", true)
 	record(t, "grep", false)
 	record(t, "grep", true)
@@ -177,29 +184,29 @@ func TestLearningStatusListsAreDisjoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sameStrings(out.Mastered, []string{"chmod"}) {
-		t.Errorf("mastered = %v, want [chmod]", out.Mastered)
-	}
-	if !sameStrings(out.AreasToWorkOn, []string{"ls -la"}) {
-		t.Errorf("areas = %v, want [ls -la]", out.AreasToWorkOn)
+	if !sameStrings(out.Mastered, []string{"chmod"}) || !sameStrings(out.AreasToWorkOn, []string{"ls -la"}) {
+		t.Errorf("mastered = %v, areas = %v", out.Mastered, out.AreasToWorkOn)
 	}
 	if len(out.DueForReview) != 0 {
-		t.Errorf("due = %v, want none yet (grep is scheduled a week out)", out.DueForReview)
-	}
-	if out.TotalPracticed != 3 {
-		t.Errorf("total practiced = %d, want 3", out.TotalPracticed)
+		t.Errorf("eligible = %v, want none yet", out.DueForReview)
 	}
 
-	// move grep's review date into the past
+	// move grep's eligibility date into the past
 	store.mu.Lock()
 	store.Items["grep"].NextReview = time.Now().Add(-time.Hour)
 	store.mu.Unlock()
 
-	_, out, err = getLearningStatus(ctx, nil, learningStatusInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, out, _ = getLearningStatus(ctx, nil, learningStatusInput{})
 	if !sameStrings(out.DueForReview, []string{"grep (stage 1)"}) {
-		t.Errorf("due = %v, want [grep (stage 1)]", out.DueForReview)
+		t.Errorf("eligible = %v, want [grep (stage 1)]", out.DueForReview)
+	}
+
+	_, one, _ := getLearningStatus(ctx, nil, learningStatusInput{Concept: " GREP "})
+	if !one.ConceptFound || !one.OkForReview || one.Status != StatusReview {
+		t.Errorf("single concept lookup: %+v", one)
+	}
+	_, missing, _ := getLearningStatus(ctx, nil, learningStatusInput{Concept: "awk"})
+	if missing.ConceptFound || missing.OkForReview {
+		t.Errorf("unknown concept lookup: %+v", missing)
 	}
 }

@@ -2,6 +2,13 @@
 # sessionstart hook for linux-mentor.
 set -euo pipefail
 
+# no display (an ssh session, a server, or WSL without graphics): skip the window quietly
+if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+  cat >/dev/null
+  printf '{}\n'
+  exit 0
+fi
+
 if [[ -n "${LINUX_MENTOR_EMBEDDED:-}" ]]; then
   cat >/dev/null
   printf '{}\n'
@@ -54,6 +61,11 @@ fi
 mapfile -t hook_fields <<<"$hook_context"
 conversation_id="${hook_fields[0]}"
 transcript_path="${hook_fields[1]}"
+
+# use the installed copy when there is no build inside the plugin folder
+if [[ ! -x "$gui" ]] && command -v linux-mentor-gui >/dev/null 2>&1; then
+  gui="$(command -v linux-mentor-gui)"
+fi
 
 # fail clearly instead of pretending the ui started when it has not been built.
 if [[ ! -x "$gui" ]]; then

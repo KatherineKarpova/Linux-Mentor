@@ -27,9 +27,14 @@ printf '%s hook fired, cwd=%s\n' "$(date -Is)" "$PWD" >> "$state_dir/hook.log"
 # resolve paths relative to this script instead of the host's current directory.
 script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
 plugin_root="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
-gui="${LINUX_MENTOR_GUI:-$plugin_root/build/bin/linux-mentor}"
-if [[ "$gui" != /* ]]; then
-  gui="$plugin_root/$gui"
+gui="${LINUX_MENTOR_GUI:-}"
+if [[ -z "$gui" ]]; then
+  for candidate in "$plugin_root/bin/linux-mentor-gui" "$plugin_root/build/bin/linux-mentor" "$(command -v linux-mentor-gui || true)"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      gui="$candidate"
+      break
+    fi
+  done
 fi
 
 # read the hook payload once; stdout is reserved for the hook's json response.

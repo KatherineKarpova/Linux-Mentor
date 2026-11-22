@@ -7,12 +7,19 @@ gui="${LINUX_MENTOR_GUI:-}"
 if [[ -z "$gui" ]]; then
   if command -v linux-mentor-gui >/dev/null 2>&1; then
     gui="$(command -v linux-mentor-gui)"
-  elif [[ -x "$here/linux-mentor-gui" ]]; then
-    gui="$here/linux-mentor-gui"
+  else
+    for candidate in \
+      "$here/linux-mentor-gui" \
+      "$here/../build/bin/linux-mentor"; do
+      if [[ -x "$candidate" ]]; then
+        gui="$candidate"
+        break
+      fi
+    done
   fi
 fi
 if [[ -z "$gui" || ! -x "$gui" ]]; then
-  echo "linux-mentor: the window program was not found. Run scripts/install.sh from the project folder first." >&2
+  echo "linux-mentor: the window program was not found. Run scripts/build-desktop.sh first." >&2
   exit 1
 fi
 

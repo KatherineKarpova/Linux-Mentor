@@ -3,7 +3,6 @@ package main
 import (
 	"embed"
 	"log"
-
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -23,7 +22,8 @@ func main() {
 		BackgroundColour: &options.RGBA{R: 18, G: 19, B: 21, A: 255},
 		AssetServer:      &assetserver.Options{Assets: assets},
 		OnStartup:        app.startup,
-		Bind:             []interface{}{app},
+		OnShutdown:       app.shutdown,
+		Bind:             []any{app},
 	})
 	if err != nil {
 		log.Fatal(err)

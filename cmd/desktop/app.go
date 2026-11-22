@@ -1,6 +1,5 @@
 // this file reads transcripts from the cli agent and send information to the Wails frontend
 
-
 package main
 
 import (
@@ -12,29 +11,31 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"linux-mentor/internal/progress"
 )
 
 // stores the active agy session and transcript reader state
 type App struct {
-	mu             sync.RWMutex		// protects shared transcript data from concurrent access
-	conversationID string			
-	transcriptPath string			
-	offset         int64			// number of transcript bytes already read
-	pending        []byte			// incomplete transcript line
-	fileInfo       os.FileInfo		// metadata for detecting file changes
+	mu             sync.RWMutex // protects shared transcript data from concurrent access
+	conversationID string
+	transcriptPath string
+	offset         int64       // number of transcript bytes already read
+	pending        []byte      // incomplete transcript line
+	fileInfo       os.FileInfo // metadata for detecting file changes
 	messages       []MentorMessage
-	followNewest   bool				// follow the newest transcript if no path was supplied
+	followNewest   bool // follow the newest transcript if no path was supplied
+	progressStore  *progress.Store
+	progressErr    error
 }
 
 // session info sent to the frontend
 type SessionInfo struct {
 	ConversationID string `json:"conversationId"`
 }
-
 
 // record format used when reading the agy transcript
 type transcriptRecord struct {
@@ -66,14 +67,14 @@ func newestTranscript() string {
 
 	// build a path pattern that matches any session directory
 	pattern := filepath.Join(home, ".gemini", "antigravity-cli", "brain", "*", ".system_generated", "logs", "transcript.jsonl")
-	
+
 	// find transcript files matching the pattern
 	matches, _ := filepath.Glob(pattern)
 
 	var newest string
 	var newestTime time.Time
 
-	// compare modification times to find the newest transcript 
+	// compare modification times to find the newest transcript
 	for _, m := range matches {
 		if info, err := os.Stat(m); err == nil && info.ModTime().After(newestTime) {
 			newest, newestTime = m, info.ModTime()
@@ -87,6 +88,20 @@ func (a *App) startup(ctx context.Context) {
 	//get the active session info from environment variables
 	a.conversationID = os.Getenv("LINUX_MENTOR_CONVERSATION_ID")
 	a.transcriptPath = os.Getenv("LINUX_MENTOR_TRANSCRIPT_PATH")
+
+	db, err := progress.OpenDefault(ctx)
+	if err != nil {
+		a.progressErr = err
+		log.Printf("linux-mentor: initialize SQLite progress database: %v", err)
+	} else {
+		a.progressStore = db
+		if a.conversationID != "" {
+			if err := db.UpsertSession(ctx, a.conversationID, time.Now()); err != nil {
+				a.progressErr = err
+				log.Printf("linux-mentor: save session: %v", err)
+			}
+		}
+	}
 
 	// follow the newest transcript when no specific path given
 	a.followNewest = a.transcriptPath == ""
@@ -109,7 +124,25 @@ func (a *App) startup(ctx context.Context) {
 				}
 			}
 		}
-	}() 
+	}()
+}
+
+func (a *App) shutdown(ctx context.Context) {
+	a.mu.Lock()
+	db := a.progressStore
+	a.progressStore = nil
+	conversationID := a.conversationID
+	a.mu.Unlock()
+
+	if db == nil {
+		return
+	}
+	if err := db.EndSession(ctx, conversationID, time.Now()); err != nil {
+		log.Printf("linux-mentor: end session: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		log.Printf("linux-mentor: close SQLite progress database: %v", err)
+	}
 }
 
 // return the active conversation id to the frontend
@@ -137,6 +170,9 @@ func (a *App) GetMessages() []MentorMessage {
 type ReviewProgressItem struct {
 	Concept          string `json:"concept"`
 	Stage            int    `json:"stage"`
+	Attempts         int    `json:"attempts"`
+	LastMisses       int    `json:"lastMisses"`
+	CurrentMisses    int    `json:"currentMisses"`
 	LastReviewed     string `json:"lastReviewed"`
 	NextReview       string `json:"nextReview"`
 	CommandAccuracy  string `json:"commandAccuracy,omitempty"`
@@ -159,9 +195,9 @@ func formatDay(t time.Time) string {
 }
 
 // get the saved learning progress and organize it for the desktop ui
-func (a *App) GetLearningProgress() LearningProgress {
-	
-	// initalize empty lists so the ui has valid data even without saved progress
+func (a *App) GetLearningProgress() (LearningProgress, error) {
+
+	// initialize empty lists so the ui has valid data even without saved progress
 	result := LearningProgress{
 		DueForReview:  []ReviewProgressItem{},
 		Mastered:      []ReviewProgressItem{},
@@ -169,67 +205,29 @@ func (a *App) GetLearningProgress() LearningProgress {
 		AllItems:      []ReviewProgressItem{},
 	}
 
-	// locate the linux mentor state directory using the xdg path or home directory
-	stateDir := os.Getenv("XDG_STATE_HOME")		
-	if stateDir == "" {
-		home, _ := os.UserHomeDir()
-		stateDir = filepath.Join(home, ".local", "state")
+	a.mu.RLock()
+	db, dbErr := a.progressStore, a.progressErr
+	a.mu.RUnlock()
+	if dbErr != nil {
+		return result, dbErr
 	}
-	// read the saved student progress data from progress.json
-	data, err := os.ReadFile(filepath.Join(stateDir, "linux-mentor", "progress.json"))
+	if db == nil {
+		return result, errors.New("SQLite progress database is not initialized")
+	}
+	items, err := db.Concepts(context.Background())
 	if err != nil {
-		return result
+		return result, err
 	}
-
-	// define the structure used to decode each saved concept from json
-	type rawItem struct {
-		Concept          string    `json:"concept"`
-		Stage            int       `json:"stage"`	// 
-		LastReviewed     time.Time `json:"last_reviewed"`
-		NextReview       time.Time `json:"next_review"`
-		CommandAccuracy  string    `json:"command_accuracy,omitempty"`
-		ExplanationDepth string    `json:"explanation_depth,omitempty"`
-		Notes            string    `json:"notes,omitempty"`
-		Status           string    `json:"status"`
-	}
-
-	// declare map where key = concept name and value = pointers to rawItem structs
-	var raw map[string]*rawItem	
-	// decode the json bytes into map
-	if err := json.Unmarshal(data, &raw); err != nil || raw == nil {
-		return result
-	}
-
-	// keys are sorted for consistent ui ordering
-	keys := make([]string, 0, len(raw))
-	for key := range raw {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	// group results by status; before correct answer, 0 wrong is mastered, 1 wrong is needs review, >=2 wrong is needs reinforcement
-	for _, key := range keys {
-		item := raw[key]
-		if item == nil {
-			continue
-		}
-		status := item.Status
-		if status == "" { // progress saved before status exists
-			switch {
-			case item.Stage >= 3:
-				status = "mastered"
-			case item.Stage <= 0:
-				status = "reinforce"
-			default:
-				status = "review"
-			}
-		}
-
+	now := time.Now()
+	for _, item := range items {
 		entry := ReviewProgressItem{
-			Concept:          key,		// use map key since it is the concept name
+			Concept:          item.Name,
 			Stage:            item.Stage,
-			LastReviewed:     formatDay(item.LastReviewed),
-			NextReview:       formatDay(item.NextReview),
+			Attempts:         item.Attempts,
+			LastMisses:       item.LastMisses,
+			CurrentMisses:    item.CurrentMisses,
+			LastReviewed:     formatDay(item.LastAttemptAt),
+			NextReview:       formatDay(item.OkForReviewAt),
 			CommandAccuracy:  item.CommandAccuracy,
 			ExplanationDepth: item.ExplanationDepth,
 			Notes:            item.Notes,
@@ -237,34 +235,48 @@ func (a *App) GetLearningProgress() LearningProgress {
 		result.AllItems = append(result.AllItems, entry)
 
 		// group concepts by status and check whether reviews are due
-		switch status {
-		case "mastered":
+		switch item.Status {
+		case progress.StatusMastered:
 			result.Mastered = append(result.Mastered, entry)
-		case "reinforce":
+		case progress.StatusReinforce:
 			result.AreasToWorkOn = append(result.AreasToWorkOn, entry)
-		case "review":
-			if !time.Now().Before(item.NextReview) {
+		case progress.StatusReview:
+			if progress.ShouldReview(item, now) {
 				result.DueForReview = append(result.DueForReview, entry)
 			}
 		}
 	}
-	return result
+	return result, nil
 }
 
 // read new transcript records and update the mentor messages
 func (a *App) readTranscript() error {
-	// lock shared app state while reading and updating transcript 
+	// lock shared app state while reading and updating transcript
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	// switch to the newest transcript if no specific session was provided
 	if a.followNewest {
 		if newest := newestTranscript(); newest != "" && newest != a.transcriptPath {
+			previousConversationID := a.conversationID
 			a.transcriptPath = newest
 
 			// extract the conversation id from the transcript directory
 			a.conversationID = filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(newest))))
-			
+			if a.progressStore != nil {
+				now := time.Now()
+				if previousConversationID != "" && previousConversationID != a.conversationID {
+					if err := a.progressStore.EndSession(context.Background(), previousConversationID, now); err != nil {
+						log.Printf("linux-mentor: end previous session: %v", err)
+						a.progressErr = err
+					}
+				}
+				if err := a.progressStore.UpsertSession(context.Background(), a.conversationID, now); err != nil {
+					log.Printf("linux-mentor: save session: %v", err)
+					a.progressErr = err
+				}
+			}
+
 			// reset the reader state when switching sessions
 			a.offset = 0
 			a.pending = nil
@@ -273,7 +285,7 @@ func (a *App) readTranscript() error {
 		}
 	}
 
-	// check whether the transcript exists and get its file information 
+	// check whether the transcript exists and get its file information
 	info, err := os.Stat(a.transcriptPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -289,7 +301,7 @@ func (a *App) readTranscript() error {
 		a.fileInfo = info
 		a.messages = nil
 	}
-	a.fileInfo = info	// save the current file information
+	a.fileInfo = info // save the current file information
 
 	file, err := os.Open(a.transcriptPath)
 	if err != nil {
@@ -358,5 +370,11 @@ func (a *App) appendAssistantMessage(line []byte) error {
 		Content:   content,
 		CreatedAt: record.CreatedAt,
 	})
+	if a.progressStore != nil && a.conversationID != "" {
+		if err := a.progressStore.TouchSession(context.Background(), a.conversationID, time.Now()); err != nil {
+			a.progressErr = err
+			log.Printf("linux-mentor: update session activity: %v", err)
+		}
+	}
 	return nil
 }

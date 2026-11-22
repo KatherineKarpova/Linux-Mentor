@@ -3,6 +3,7 @@ module linux-mentor
 go 1.27.3
 
 require (
+	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/wailsapp/wails/v2 v2.17.1
 )

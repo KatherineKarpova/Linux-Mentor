@@ -2,136 +2,33 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"linux-mentor/internal/docs"
+	"linux-mentor/internal/progress"
 )
-
-var testNow = time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
-
-func grade(item *ReviewItem, results ...bool) {
-	for _, passed := range results {
-		applyEvaluation(item, passed, testNow)
-	}
-}
-
-func daysUntilNext(item *ReviewItem) int {
-	return int(item.NextReview.Sub(testNow).Hours() / 24)
-}
-
-func sameStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-type step struct {
-	stage  int
-	days   int
-	status string
-}
-
-func runSteps(t *testing.T, answers []bool, steps []step) {
-	t.Helper()
-	item := &ReviewItem{Concept: "chmod"}
-	for i, want := range steps {
-		grade(item, answers...)
-		if item.Stage != want.stage || item.Status != want.status || daysUntilNext(item) != want.days {
-			t.Fatalf("round %d: stage %d, status %q, %d days; want stage %d, status %q, %d days",
-				i+1, item.Stage, item.Status, daysUntilNext(item), want.stage, want.status, want.days)
-		}
-	}
-}
-
-func TestCorrectImmediatelyClimbsToMastery(t *testing.T) {
-	runSteps(t, []bool{true}, []step{
-		{1, 14, StatusLearning},
-		{2, 28, StatusLearning},
-		{3, 56, StatusMastered},
-		{3, 56, StatusMastered}, // more correct answers maintain mastery
-	})
-}
-
-func TestWrongOnceThenCorrect(t *testing.T) {
-	runSteps(t, []bool{false, true}, []step{
-		{1, 2, StatusReview},
-		{2, 4, StatusReview},
-		{3, 8, StatusReview},
-		{3, 8, StatusReview}, // progression stops at three stages
-	})
-}
-
-func TestWrongTwiceOrMoreThenCorrect(t *testing.T) {
-	runSteps(t, []bool{false, false, true}, []step{
-		{1, 1, StatusReinforce},
-		{2, 2, StatusReinforce},
-		{3, 4, StatusReinforce},
-	})
-	runSteps(t, []bool{false, false, false, true}, []step{
-		{1, 1, StatusReinforce}, // three wrong answers still count as "twice or more"
-	})
-}
-
-func TestChangingCategoryResetsTheStage(t *testing.T) {
-	item := &ReviewItem{Concept: "chmod"}
-	grade(item, true, true) // clean, stage 2
-	grade(item, false, true) // wrong once: new category, back to stage 1
-	if item.Stage != 1 || item.Status != StatusReview || daysUntilNext(item) != 2 {
-		t.Fatalf("got stage %d, status %q, %d days", item.Stage, item.Status, daysUntilNext(item))
-	}
-	grade(item, true) // clean again: another change, stage 1 with the clean interval
-	if item.Stage != 1 || item.Status != StatusLearning || daysUntilNext(item) != 14 {
-		t.Fatalf("got stage %d, status %q, %d days", item.Stage, item.Status, daysUntilNext(item))
-	}
-}
-
-func TestAMissBreaksTheMasteryStreak(t *testing.T) {
-	item := &ReviewItem{Concept: "grep"}
-	grade(item, true, true)  // two first-try successes
-	grade(item, false, true) // a miss resets the streak
-	grade(item, true, true)  // two clean answers are not enough yet
-	if item.Status == StatusMastered {
-		t.Fatal("mastered after only two clean answers following a miss")
-	}
-	grade(item, true) // the third consecutive first-try success
-	if item.Status != StatusMastered {
-		t.Fatalf("status = %q, want mastered after three clean answers in a row", item.Status)
-	}
-}
-
-func TestUnresolvedMissNeedsReinforcementAndIsEligibleNow(t *testing.T) {
-	item := &ReviewItem{Concept: "ls -la"}
-	grade(item, false)
-	if item.Status != StatusReinforce || item.CurrentMisses != 1 {
-		t.Fatalf("status %q, misses %d", item.Status, item.CurrentMisses)
-	}
-	if !shouldReview(item, testNow) {
-		t.Fatal("an unresolved concept should be eligible immediately")
-	}
-}
-
-func TestMissCounterResetsAfterACorrectAnswer(t *testing.T) {
-	item := &ReviewItem{Concept: "chmod"}
-	grade(item, false, false, true)
-	if item.CurrentMisses != 0 || item.Attempts != 3 {
-		t.Fatalf("misses %d, attempts %d, want 0 and 3", item.CurrentMisses, item.Attempts)
-	}
-}
-
-// --- the tools, using a temporary progress file ---
 
 func newTestStore(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	initProgressStore()
+	if err := initProgressStore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if store != nil {
+			if err := store.Close(); err != nil {
+				t.Errorf("close progress store: %v", err)
+			}
+		}
+	})
 }
 
-func record(t *testing.T, concept string, passed bool) {
+func record(t *testing.T, concept string, passed bool) recordEvaluationOutput {
 	t.Helper()
 	_, out, err := recordEvaluation(context.Background(), nil, recordEvaluationInput{
 		Concept: concept,
@@ -140,73 +37,206 @@ func record(t *testing.T, concept string, passed bool) {
 	if err != nil || !out.Success {
 		t.Fatalf("recordEvaluation(%q, %v): success=%v err=%v", concept, passed, out.Success, err)
 	}
+	return out
 }
 
-func TestRecordEvaluationNormalizesConceptNames(t *testing.T) {
+func TestRecordEvaluationNormalizesNamesAndPersistsAttemptHistory(t *testing.T) {
 	newTestStore(t)
 	record(t, "  CHMOD ", true)
-	record(t, "chmod", true)
+	record(t, "chmod", false)
 
-	if len(store.Items) != 1 {
-		t.Fatalf("got %d concepts, want 1", len(store.Items))
+	concepts, err := store.Concepts(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if item := store.Items["chmod"]; item == nil || item.Attempts != 2 || item.Stage != 2 {
-		t.Fatalf("got %+v, want chmod with 2 attempts at stage 2", item)
+	if len(concepts) != 1 {
+		t.Fatalf("got %d concepts, want 1", len(concepts))
+	}
+	item := concepts[0]
+	if item.Name != "chmod" || item.Attempts != 2 || item.Stage != 0 ||
+		item.CurrentMisses != 1 || item.LastMisses != 0 || item.Status != progress.StatusReinforce {
+		t.Fatalf("unexpected concept progress: %+v", item)
+	}
+	if item.LastAttemptAt.IsZero() || !item.OkForReviewAt.Equal(item.LastAttemptAt) {
+		t.Fatalf("last attempt %v, review eligibility %v", item.LastAttemptAt, item.OkForReviewAt)
+	}
+	blocks, err := store.ReviewBlocks(context.Background(), "chmod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 2 || !blocks[0].Passed || blocks[0].Misses != 0 ||
+		blocks[1].Passed || blocks[1].Misses != 1 {
+		t.Fatalf("review blocks = %+v, want clean block followed by one open miss", blocks)
 	}
 }
 
-func TestProgressSurvivesARestart(t *testing.T) {
-	newTestStore(t)
+func TestProgressSurvivesRestartAndDatabaseIsLocal(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	if err := initProgressStore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	record(t, "grep", false)
 	record(t, "grep", true)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-	initProgressStore() // reload from the file the server just wrote
-
-	item := store.Items["grep"]
-	if item == nil || item.Status != StatusReview || item.Stage != 1 {
-		t.Fatalf("after reload: %+v", item)
+	if err := initProgressStore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	concepts, err := store.Concepts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(concepts) != 1 || concepts[0].Name != "grep" ||
+		concepts[0].Status != progress.StatusReview || concepts[0].Stage != 1 ||
+		concepts[0].Attempts != 2 || concepts[0].CurrentMisses != 0 {
+		t.Fatalf("after reopening database: %+v", concepts)
+	}
+	dbPath := filepath.Join(stateHome, "linux-mentor", "progress.db")
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("database was not created at %s: %v", dbPath, err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("database permissions = %o, want 600", info.Mode().Perm())
 	}
 }
 
-func TestLearningStatusListsAndEligibility(t *testing.T) {
+func TestLearningStatusReflectsDueConceptsAndReviewEligibility(t *testing.T) {
 	newTestStore(t)
-	record(t, "chmod", true)
-	record(t, "chmod", true)
-	record(t, "chmod", true)
-	record(t, "grep", false)
-	record(t, "grep", true)
-	record(t, "ls -la", false)
-	record(t, "ls -la", false)
-	record(t, "ls -la", true)
-
 	ctx := context.Background()
+	now := time.Now().UTC()
+
+	_, err := store.RecordEvaluation(ctx, "chmod", true, "", "", "", "", now.AddDate(0, 0, -15))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.RecordEvaluation(ctx, "grep", false, "", "", "", "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.RecordEvaluation(ctx, "ls -la", false, "", "", "", "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	_, out, err := getLearningStatus(ctx, nil, learningStatusInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sameStrings(out.Mastered, []string{"chmod"}) || !sameStrings(out.AreasToWorkOn, []string{"ls -la"}) {
-		t.Errorf("mastered = %v, areas = %v", out.Mastered, out.AreasToWorkOn)
+	if !reflect.DeepEqual(out.DueForReview, []string{"chmod (stage 1)", "grep (stage 0)", "ls -la (stage 0)"}) {
+		t.Errorf("eligible = %v", out.DueForReview)
 	}
-	if len(out.DueForReview) != 0 {
-		t.Errorf("eligible = %v, want none yet", out.DueForReview)
-	}
-
-	// move grep's eligibility date into the past
-	store.mu.Lock()
-	store.Items["grep"].NextReview = time.Now().Add(-time.Hour)
-	store.mu.Unlock()
-
-	_, out, _ = getLearningStatus(ctx, nil, learningStatusInput{})
-	if !sameStrings(out.DueForReview, []string{"grep (stage 1)"}) {
-		t.Errorf("eligible = %v, want [grep (stage 1)]", out.DueForReview)
+	if !reflect.DeepEqual(out.AreasToWorkOn, []string{"grep", "ls -la"}) {
+		t.Errorf("areas = %v", out.AreasToWorkOn)
 	}
 
-	_, one, _ := getLearningStatus(ctx, nil, learningStatusInput{Concept: " GREP "})
-	if !one.ConceptFound || !one.OkForReview || one.Status != StatusReview {
+	_, one, err := getLearningStatus(ctx, nil, learningStatusInput{Concept: " CHMOD "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !one.ConceptFound || !one.OkForReview || one.Status != progress.StatusLearning {
 		t.Errorf("single concept lookup: %+v", one)
 	}
-	_, missing, _ := getLearningStatus(ctx, nil, learningStatusInput{Concept: "awk"})
+	_, missing, err := getLearningStatus(ctx, nil, learningStatusInput{Concept: "awk"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if missing.ConceptFound || missing.OkForReview {
 		t.Errorf("unknown concept lookup: %+v", missing)
+	}
+}
+
+func TestUserPreferencesCanBeReadAndSaved(t *testing.T) {
+	newTestStore(t)
+	ctx := context.Background()
+
+	_, defaults, err := getUserPreferences(ctx, nil, statusInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.InteractionStyle != "socratic" || defaults.Tone != "encouraging" {
+		t.Fatalf("unexpected defaults: %+v", defaults)
+	}
+
+	_, saved, err := saveUserPreferences(ctx, nil, saveUserPreferencesInput{
+		InteractionStyle: "direct when requested",
+		Tone:             "calm",
+		ResponseLength:   "brief",
+		AdditionalNotes:  "Prefer plain language.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, loaded, err := getUserPreferences(ctx, nil, statusInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.InteractionStyle != loaded.InteractionStyle ||
+		saved.Tone != loaded.Tone ||
+		saved.ResponseLength != loaded.ResponseLength ||
+		saved.AdditionalNotes != loaded.AdditionalNotes {
+		t.Fatalf("saved = %+v, loaded = %+v", saved, loaded)
+	}
+}
+
+func TestSearchDocsUsesOnlyTheDetectedDistroSection(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "docs.db")
+	ubuntuRoot := filepath.Join(root, "ubuntu")
+	fedoraRoot := filepath.Join(root, "fedora")
+	writeReadme(t, ubuntuRoot, "Ubuntu documents package installation with apt.")
+	writeReadme(t, fedoraRoot, "Fedora documents package installation with dnf.")
+
+	ubuntu, err := docs.Open(ctx, dbPath, docs.Release{ID: "ubuntu"}, []string{ubuntuRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ubuntu.Close()
+	fedora, err := docs.Open(ctx, dbPath, docs.Release{ID: "fedora"}, []string{fedoraRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fedora.Close()
+
+	previous := docsStore
+	docsStore = ubuntu
+	t.Cleanup(func() { docsStore = previous })
+	_, out, err := searchDocs(ctx, nil, searchDocsInput{Query: "package installation apt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.DistroID != "ubuntu" || len(out.Results) != 1 ||
+		!strings.Contains(out.Results[0].Snippet, "Ubuntu") {
+		t.Fatalf("Ubuntu search output = %+v", out)
+	}
+
+	empty, err := docs.Open(ctx, dbPath, docs.Release{ID: "unknown-distro"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer empty.Close()
+	docsStore = empty
+	_, out, err = searchDocs(ctx, nil, searchDocsInput{Query: "package installation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.DistroID != "unknown-distro" || len(out.Results) != 0 ||
+		!strings.Contains(out.Message, "No local documentation") {
+		t.Fatalf("empty distro section unexpectedly used another section: %+v", out)
+	}
+}
+
+func writeReadme(t *testing.T, root, content string) {
+	t.Helper()
+	path := filepath.Join(root, "example", "README.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

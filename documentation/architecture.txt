@@ -9,9 +9,10 @@ Product objective
 -----------------
 Linux Mentor is an educational assistant for Antigravity CLI. It should help
 learners reason through Linux troubleshooting and system concepts using concise,
-Socratic guidance, not automate the learner's work. Ubuntu and Fedora are the
-initial supported distributions. The intended audience includes university
-learners.
+Socratic guidance, not automate the learner's work. Distro-specific guidance
+uses the active Linux distribution's installed documentation where available;
+coverage depends on local documentation packages. The intended audience includes
+university learners.
 
 Current decisions
 -----------------
@@ -30,8 +31,8 @@ Current decisions
 
 Implemented
 -----------
-- `cmd/mcp-server/main.go` registers a `get_status` MCP tool and serves it over
-  stdio. This is a connectivity stub, not a Linux diagnostic or AI service.
+- `cmd/mcp-server/main.go` serves MCP tools over stdio. `get_status` is a
+  connectivity check, and progress and preference tools use the local SQLite store.
 - `hooks.json` enables the `SessionStart` hook.
 - `scripts/on-session-start.sh` reads the hook's JSON input, validates the
   conversation ID and transcript path, starts the configured GUI process, and
@@ -49,6 +50,9 @@ Implemented
   and renders mentor responses without mirroring user input.
 - `scripts/build-desktop.sh` builds the React assets and packages the Wails
   executable at the hook's default launch path.
+- The desktop app and MCP server share the per-user SQLite database. The GUI
+  creates/updates session metadata; the MCP tools persist evaluations and
+  interaction preferences.
 
 Response flow and limitations
 -----------------------------
@@ -65,26 +69,40 @@ The executable must be built before the hook can launch it.
 
 Not implemented
 ---------------
-- Linux distribution detection and distribution-aware guidance.
 - Packaging, installation, and a cross-distribution release process.
 
 Offline Documentation & Spaced Repetition Design
 ------------------------------------------------
-1. Precompiled Offline Documentation:
-   - Fetched dataset stored at `${XDG_DATA_HOME:-~/.local/share}/linux-mentor/docs.db`.
-   - SQLite FTS5 virtual table indexing Ubuntu and Fedora man pages, package
-     management guides, system administration handbooks, and troubleshooting docs.
-   - Read-only search queried by the MCP server (`search_docs`) before generating responses.
+1. Local Documentation Retrieval:
+   - The MCP server creates `${XDG_DATA_HOME:-~/.local/share}/linux-mentor/docs.db`
+     on first launch and reads the active distro's exact `ID` from `/etc/os-release`.
+   - It indexes installed man pages and selected text documentation from standard
+     `/usr/share` and `/usr/local/share` locations. Text is stored once with a
+     SQLite token-frequency index for local ranking.
+   - `search_docs` searches only rows tagged with the detected distro ID and returns
+     up to five short excerpts with local source paths. It does not fall back to
+     `ID_LIKE` or another distro's docs. The index refreshes every 30 days.
+   - Coverage depends on documentation installed on the user's system; this does
+     not download or bundle a complete official documentation corpus.
 
 2. Student Progress & Spaced Repetition:
    - Stored locally at `${XDG_STATE_HOME:-~/.local/state}/linux-mentor/progress.db`.
-   - Tracks questions asked, user answers, command accuracy, and explanation depth.
-   - Spaced repetition intervals:
-     * Stage 1: Review in 7 days upon first correct demonstration.
-     * Stage 2: Review in 2 months (60 days) on subsequent success.
-     * Stage 3: Review in 3 months (90 days) on subsequent success.
-     * Failure/Struggle: Fall back one stage and flag as an active area to work on.
-   - Prevents redundant questioning and tailors Socratic guidance.
+   - The database is created and schema-migrated on the first desktop or MCP-server
+     launch. SQLite is the sole persistence format; the database and its directory
+     are restricted to the current OS user.
+   - `sessions` keeps conversation IDs and start/activity/end timestamps, not
+     transcript contents. `concepts` stores current scheduling state and its
+     creation date. `attempts` is the source of truth for individual answers.
+     `review_blocks` groups each run of misses through its next correct answer,
+     preserving the exact miss total for that review; concept summaries derive
+     current misses from the open block and cap previous misses at 2.
+   - `user_preferences` stores interaction style, tone, response length, and
+     optional learner-authored notes. These preferences are personalization only
+     and cannot override safety or higher-priority instructions.
+   - No MAC address or other hardware identifier is collected.
+   - Review intervals are 14/28/56 days after a clean success, 2/4/8 days after
+     one miss, and 1/2/4 days after two or more misses. Unresolved misses are
+     immediately eligible for reinforcement.
 
 3. Desktop UI as Study Guide & Reference Sheet:
    - Desktop UI in `cmd/desktop` serves as a learning companion and study guide.
@@ -93,9 +111,11 @@ Offline Documentation & Spaced Repetition Design
 
 4. MCP Server Tools (`cmd/mcp-server/main.go`):
    - `get_status`: Server health check.
-   - `search_docs`: Offline documentation search across Ubuntu/Fedora.
+   - `search_docs`: Ranked local-document retrieval, scoped to the detected distro.
    - `get_learning_status`: Active review queue and mastered topics.
    - `record_evaluation`: Record command accuracy and explanation depth milestones.
+   - `get_user_preferences` and `save_user_preferences`: Read/write local
+     interaction preferences when requested by the learner.
 
 Design constraints
 ------------------
@@ -108,15 +128,14 @@ Design constraints
 - Keep assistant-response display independent of the MCP server. The MCP server
   provides tools to Antigravity; the transcript is the current candidate
   transport from Antigravity to the UI.
-- Prefer a single local process and the existing transcript over introducing a
+- Keep storage local and use the existing transcript rather than introducing a
   network service or forwarding all chat content through another API.
 
 Next implementation steps
 ------------------------
-1. Implement MCP tool handlers in `cmd/mcp-server/main.go` for `search_docs`,
-   `get_learning_status`, and `record_evaluation`.
-2. Connect `progress.db` and `docs.db` SQLite storage.
-3. Update `cmd/desktop/frontend` React study guide UI to render review queues,
+1. Validate local documentation indexing against additional distro-specific
+   man-page layouts and formats.
+2. Update `cmd/desktop/frontend` React study guide UI to render review queues,
    reference sheets, and improvement areas.
-4. Verify transcript event shapes against supported Antigravity CLI versions.
-5. Add packaged installation and release workflows for supported Linux systems.
+3. Verify transcript event shapes against supported Antigravity CLI versions.
+4. Add packaged installation and release workflows for supported Linux systems.

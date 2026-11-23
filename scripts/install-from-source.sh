@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup for Linux Mentor: builds the programs, installs them for the
+# Installs Linux Mentor from a source checkout: builds the programs, installs them for the
 # current user, and registers the plugin with agy. Safe to run again after updates.
 set -euo pipefail
 
@@ -9,9 +9,9 @@ bin_dir="${LINUX_MENTOR_BIN_DIR:-$HOME/.local/bin}"
 say()  { printf 'linux-mentor: %s\n' "$*"; }
 fail() { printf 'linux-mentor: %s\n' "$*" >&2; exit 1; }
 
-# 1. tools needed to build
+# 1. tools needed to build (python3 is used by the session hook at runtime)
 missing=()
-for tool in go npm pkg-config; do
+for tool in go npm pkg-config python3; do
   command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
 if ((${#missing[@]})); then

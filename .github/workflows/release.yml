@@ -1,0 +1,100 @@
+# Builds Linux Mentor for amd64 and arm64 and publishes a GitHub release.
+#
+# Release:   git tag v0.2.0 && git push origin v0.2.0
+# Test only: Actions tab -> Release -> Run workflow (builds and keeps the archives
+#            as workflow artifacts, without creating a release)
+#
+# Builds run on Ubuntu 22.04 on purpose: the window links against the build
+# machine's GTK and WebKit, and runs only where those are the same or newer.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cmd/desktop/frontend/package-lock.json
+
+      - name: Install GTK and WebKit build files
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
+
+      - name: Build release archives
+        run: scripts/package-release.sh "${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}"
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Check the scripts
+        run: for f in scripts/*.sh; do bash -n "$f"; done
+
+      - name: Check the package installs
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
+            "dist/linux-mentor-linux-${{ matrix.arch }}.zip" "$work"
+          chmod +x "$work"/linux-mentor/install.sh "$work"/linux-mentor/bin/* "$work"/linux-mentor/scripts/*.sh
+          sudo apt-get install -y --no-install-recommends libgtk-3-0 libwebkit2gtk-4.1-0
+          HOME="$work/home" bash "$work/linux-mentor/install.sh" </dev/null
+          test -x "$work/home/.local/bin/run-mentor"
+          test -x "$work/home/.local/share/linux-mentor/app/bin/linux-mentor-gui"
+          ldd "$work/home/.local/bin/linux-mentor-gui" | (! grep 'not found')
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-mentor-linux-${{ matrix.arch }}
+          path: |
+            dist/linux-mentor-linux-${{ matrix.arch }}.zip
+            dist/linux-mentor-linux-${{ matrix.arch }}.zip.sha256
+            dist/linux-mentor-linux-${{ matrix.arch }}.tar.gz
+            dist/linux-mentor-linux-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "Linux Mentor $TAG" --generate-notes
+          gh release upload "$TAG" dist/* --clobber

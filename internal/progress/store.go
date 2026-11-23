@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -180,9 +180,9 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	dsn := path
 	if path != ":memory:" {
 		fileURL := (&url.URL{Scheme: "file", Path: path}).String()
-		dsn = fileURL + "?_busy_timeout=5000&_foreign_keys=on&_journal_mode=WAL"
+		dsn = fileURL + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
 	}
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite database: %w", err)
 	}

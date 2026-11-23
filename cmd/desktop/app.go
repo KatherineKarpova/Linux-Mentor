@@ -20,14 +20,14 @@ import (
 
 // stores the active agy session and transcript reader state
 type App struct {
-	mu             sync.RWMutex // protects shared transcript data from concurrent access
+	mu             sync.RWMutex 	// protects shared transcript data from concurrent access
 	conversationID string
 	transcriptPath string
-	offset         int64       // number of transcript bytes already read
-	pending        []byte      // incomplete transcript line
-	fileInfo       os.FileInfo // metadata for detecting file changes
+	offset         int64			// number of transcript bytes already read
+	pending        []byte      		// incomplete transcript line
+	fileInfo       os.FileInfo		// metadata for detecting file changes
 	messages       []MentorMessage
-	followNewest   bool // follow the newest transcript if no path was supplied
+	followNewest   bool				// follow the newest transcript if no path was supplied
 	progressStore  *progress.Store
 	progressErr    error
 }

@@ -79,6 +79,12 @@ if [[ ! -x "$gui" ]]; then
   exit 0
 fi
 
+# WebKit often draws a blank window inside virtual machines (VirtualBox, VMware);
+# its DMA-BUF renderer needs GPU features those virtual graphics cards lack.
+if [[ -z "${WEBKIT_DISABLE_DMABUF_RENDERER:-}" ]] && systemd-detect-virt --vm --quiet 2>/dev/null; then
+  export WEBKIT_DISABLE_DMABUF_RENDERER=1
+fi
+
 # pass read-only conversation context for the future transcript reader.
 LINUX_MENTOR_CONVERSATION_ID="$conversation_id" \
 LINUX_MENTOR_TRANSCRIPT_PATH="$transcript_path" \

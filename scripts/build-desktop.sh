@@ -23,8 +23,9 @@ mkdir -p "$(dirname "$output")"
 cd "$plugin_root"
 
 # wails needs these build tags; a plain `go build` produces a binary that won't start.
+# prefer WebKit2GTK 4.1: current distros only ship 4.1, so a 4.0 build won't run there.
 tags="desktop,production"
-if pkg-config --exists webkit2gtk-4.1 && ! pkg-config --exists webkit2gtk-4.0; then
+if pkg-config --exists webkit2gtk-4.1; then
   tags="$tags,webkit2_41"
 fi
 go build -tags "$tags" -o "$output" ./cmd/desktop

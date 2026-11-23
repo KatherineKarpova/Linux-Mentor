@@ -185,7 +185,7 @@ func TestReviewBlocksRetainExactMissesBetweenSuccessfulReviews(t *testing.T) {
 func TestVersionOneDatabaseMigratesWithoutLosingProgress(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "progress.db")
-	legacy, err := sql.Open("sqlite3", path)
+	legacy, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}

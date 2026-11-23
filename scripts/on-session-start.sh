@@ -76,7 +76,7 @@ fi
 if [[ ! -x "$gui" ]]; then
   printf 'linux-mentor: GUI executable not found: %s\n' "$gui" >&2
   printf '{}\n'
-  exit 1
+  exit 0
 fi
 
 # pass read-only conversation context for the future transcript reader.

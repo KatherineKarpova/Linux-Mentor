@@ -20,11 +20,11 @@ mkdir -p "$out/bin" "$out/scripts" "$out/rules"
 "$repo/scripts/build-desktop.sh"
 cp "$repo/build/bin/linux-mentor" "$out/bin/linux-mentor-gui"
 
-# the MCP server (pure Go, so a static binary)
-(cd "$repo" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$out/bin/linux-mentor-mcp" ./cmd/mcp-server)
+# the MCP server (needs cgo for github.com/mattn/go-sqlite3)
+(cd "$repo" && CGO_ENABLED=1 go build -trimpath -ldflags "-s -w" -o "$out/bin/linux-mentor-mcp" ./cmd/mcp-server)
 
 # plugin files
-cp "$repo/plugin.json" "$repo/hooks.json" "$repo/mcp_config.json" "$repo/LINUXMENTOR.md" "$repo/README.md" "$out/"
+cp "$repo/plugin.json" "$repo/hooks.json" "$repo/mcp_config.json" "$repo/LINUXMENTOR.md" "$repo/README.md" "$repo/INSTALL.md" "$out/"
 cp "$repo/rules/AGENTS.md" "$out/rules/"
 [ -f "$repo/LICENSE" ] && cp "$repo/LICENSE" "$out/"
 cp "$repo/scripts/on-session-start.sh" "$repo/scripts/run-mentor.sh" "$out/scripts/"
@@ -36,4 +36,9 @@ echo "$version" > "$out/VERSION"
 chmod +x "$out"/bin/* "$out"/scripts/*.sh "$out/install.sh"
 
 (cd "$repo/dist" && tar -czf "$name.tar.gz" "$name" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+
+# a copy without the version in its name, so releases/latest/download/... links keep working
+latest="linux-mentor-linux-${arch}.tar.gz"
+(cd "$repo/dist" && cp "$name.tar.gz" "$latest" && sha256sum "$latest" > "$latest.sha256")
 echo "built: $repo/dist/$name.tar.gz"
+echo "built: $repo/dist/$latest"

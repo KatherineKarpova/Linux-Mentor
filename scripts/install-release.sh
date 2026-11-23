@@ -9,6 +9,7 @@ say()  { printf 'linux-mentor: %s\n' "$*"; }
 fail() { printf 'linux-mentor: %s\n' "$*" >&2; exit 1; }
 
 [[ "$(uname -s)" == "Linux" ]] || fail "Linux Mentor runs on Linux only."
+command -v python3 >/dev/null 2>&1 || fail "python3 is required (the session hook uses it). Install it, for example: sudo apt install python3 (Ubuntu) or sudo dnf install python3 (Fedora), then run this again."
 
 want="$(cat "$pkg/ARCH" 2>/dev/null || echo unknown)"
 case "$(uname -m)" in x86_64) have=amd64 ;; aarch64) have=arm64 ;; *) have=unknown ;; esac
@@ -49,4 +50,6 @@ fi
 
 say "done. Keep this folder in place: the plugin links back to it."
 say "start agy and the window opens with each new conversation, or run: run-mentor"
-say "to skip tool-approval prompts, see scripts/allow-tools.sh"
+if [[ -f "$pkg/scripts/allow-tools.sh" ]]; then
+  say "to skip tool-approval prompts, see $pkg/scripts/allow-tools.sh"
+fi

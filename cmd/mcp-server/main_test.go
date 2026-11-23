@@ -140,12 +140,22 @@ func TestLearningStatusReflectsDueConceptsAndReviewEligibility(t *testing.T) {
 	if !one.ConceptFound || !one.OkForReview || one.Status != progress.StatusLearning {
 		t.Errorf("single concept lookup: %+v", one)
 	}
+	// asking about one concept still includes the overall summary
+	if one.TotalPracticed != 3 ||
+		!reflect.DeepEqual(one.AreasToWorkOn, out.AreasToWorkOn) ||
+		!reflect.DeepEqual(one.DueForReview, out.DueForReview) {
+		t.Errorf("single concept lookup lost the summary: total=%d areas=%v due=%v",
+			one.TotalPracticed, one.AreasToWorkOn, one.DueForReview)
+	}
 	_, missing, err := getLearningStatus(ctx, nil, learningStatusInput{Concept: "awk"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if missing.ConceptFound || missing.OkForReview {
 		t.Errorf("unknown concept lookup: %+v", missing)
+	}
+	if missing.TotalPracticed != 3 {
+		t.Errorf("unknown concept lookup total = %d, want 3", missing.TotalPracticed)
 	}
 }
 

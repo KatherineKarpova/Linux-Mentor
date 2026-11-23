@@ -197,54 +197,8 @@ func getLearningStatus(ctx context.Context,
 		AreasToWorkOn: []string{},
 	}
 
-	// one concept: tell the mentor whether it is eligible to come up
-	if concept := strings.ToLower(strings.TrimSpace(input.Concept)); concept != "" {
-		concepts, err := store.Concepts(ctx)
-		if err != nil {
-			return nil, learningStatusOutput{}, err
-		}
-		var found *ReviewItem
-		for i := range concepts {
-			if concepts[i].Concept == concept {
-				found = &concepts[i]
-				break
-			}
-		}
-		if found == nil {
-			out.Message = fmt.Sprintf("'%s' has not been practiced yet", concept)
-			return nil, out, nil
-		}
-		out.ConceptFound = true
-		out.OkForReview = progress.ShouldReview(*found, now)
-		out.Status = found.Status
-		out.Stage = found.Stage
-		out.NextReview = found.NextReview.Format("2006-01-02")
-		out.Attempts = found.Attempts
-		out.LastMisses = found.LastMisses
-		out.CurrentMisses = found.CurrentMisses
-		blocks, err := store.ReviewBlocks(ctx, found.Concept)
-		if err != nil {
-			return nil, learningStatusOutput{}, err
-		}
-		for _, block := range blocks {
-			out.ReviewHistory = append(out.ReviewHistory, reviewBlockOutput{
-				Number:           block.Number + 1,
-				StartedAt:        block.StartedAt.Format(time.RFC3339),
-				LastAttemptAt:    block.LastAttemptAt.Format(time.RFC3339),
-				Misses:           block.Misses,
-				Passed:           block.Passed,
-				Attempts:         block.Attempts,
-				CommandAccuracy:  block.CommandAccuracy,
-				ExplanationDepth: block.ExplanationDepth,
-				Notes:            block.Notes,
-			})
-		}
-		out.Message = fmt.Sprintf("'%s' is %s (stage %d), eligible after %s",
-			found.Concept, found.Status, found.Stage, out.NextReview)
-		return nil, out, nil
-	}
-
-	// overall summary
+	// the overall summary is always included, so a single-concept answer never
+	// reports zero practiced concepts or empty lists next to that concept's history
 	concepts, err := store.Concepts(ctx)
 	if err != nil {
 		return nil, learningStatusOutput{}, err
@@ -260,14 +214,58 @@ func getLearningStatus(ctx context.Context,
 			out.DueForReview = append(out.DueForReview, fmt.Sprintf("%s (stage %d)", item.Concept, item.Stage))
 		}
 	}
-	// sort concepts alhabetically for consistency
+	// sort concepts alphabetically for consistency
 	sort.Strings(out.DueForReview)
 	sort.Strings(out.Mastered)
 	sort.Strings(out.AreasToWorkOn)
-
 	out.TotalPracticed = len(concepts)
 	out.Message = fmt.Sprintf("Tracking %d concepts (%d mastered, %d eligible if they come up naturally)",
 		len(concepts), len(out.Mastered), len(out.DueForReview))
+
+	concept := strings.ToLower(strings.TrimSpace(input.Concept))
+	if concept == "" {
+		return nil, out, nil
+	}
+
+	// one concept: also tell the mentor whether it is eligible to come up
+	var found *ReviewItem
+	for i := range concepts {
+		if concepts[i].Concept == concept {
+			found = &concepts[i]
+			break
+		}
+	}
+	if found == nil {
+		out.Message = fmt.Sprintf("'%s' has not been practiced yet. %s", concept, out.Message)
+		return nil, out, nil
+	}
+	out.ConceptFound = true
+	out.OkForReview = progress.ShouldReview(*found, now)
+	out.Status = found.Status
+	out.Stage = found.Stage
+	out.NextReview = found.NextReview.Format("2006-01-02")
+	out.Attempts = found.Attempts
+	out.LastMisses = found.LastMisses
+	out.CurrentMisses = found.CurrentMisses
+	blocks, err := store.ReviewBlocks(ctx, found.Concept)
+	if err != nil {
+		return nil, learningStatusOutput{}, err
+	}
+	for _, block := range blocks {
+		out.ReviewHistory = append(out.ReviewHistory, reviewBlockOutput{
+			Number:           block.Number + 1,
+			StartedAt:        block.StartedAt.Format(time.RFC3339),
+			LastAttemptAt:    block.LastAttemptAt.Format(time.RFC3339),
+			Misses:           block.Misses,
+			Passed:           block.Passed,
+			Attempts:         block.Attempts,
+			CommandAccuracy:  block.CommandAccuracy,
+			ExplanationDepth: block.ExplanationDepth,
+			Notes:            block.Notes,
+		})
+	}
+	out.Message = fmt.Sprintf("'%s' is %s (stage %d), eligible after %s. %s",
+		found.Concept, found.Status, found.Stage, out.NextReview, out.Message)
 	return nil, out, nil
 }
 

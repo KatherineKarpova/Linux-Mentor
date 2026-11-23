@@ -508,9 +508,20 @@ func (s *Store) RecordEvaluation(
 		return ReviewItem{}, fmt.Errorf("update concept %q: %w", name, err)
 	}
 
+	// the session row may not exist yet: only the desktop window creates it, and the
+	// window is not always started by the session hook (run-mentor, no display).
 	var attemptSessionID any
 	if sessionID != "" {
 		attemptSessionID = sessionID
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO sessions(id, started_at, last_seen_at)
+			VALUES (?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				last_seen_at = MAX(sessions.last_seen_at, excluded.last_seen_at)
+			WHERE sessions.ended_at IS NULL
+		`, sessionID, stamp, stamp); err != nil {
+			return ReviewItem{}, fmt.Errorf("save evaluation session %q: %w", sessionID, err)
+		}
 	}
 	var passedValue int
 	if passed {
@@ -526,14 +537,6 @@ func (s *Store) RecordEvaluation(
 	if err != nil {
 		return ReviewItem{}, fmt.Errorf("save attempt for %q: %w", name, err)
 	}
-	if sessionID != "" {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE sessions SET last_seen_at = MAX(last_seen_at, ?) WHERE id = ? AND ended_at IS NULL
-		`, stamp, sessionID); err != nil {
-			return ReviewItem{}, fmt.Errorf("update evaluation session activity: %w", err)
-		}
-	}
-
 	item, err = getConcept(ctx, tx, name)
 	if err != nil {
 		return ReviewItem{}, fmt.Errorf("reload concept %q: %w", name, err)

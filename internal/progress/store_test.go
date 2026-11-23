@@ -321,3 +321,32 @@ func TestVersionOneDatabaseMigratesWithoutLosingProgress(t *testing.T) {
 		t.Fatalf("foreign key check = %v, want no violations", err)
 	}
 }
+
+func TestEvaluationWithUnknownSessionCreatesIt(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "progress.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	if _, err := store.RecordEvaluation(
+		ctx, "chmod", true, "correct mode", "explained bits", "", "never-seen-session", now,
+	); err != nil {
+		t.Fatalf("evaluation for a session the window never registered: %v", err)
+	}
+
+	var sessions, attempts int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sessions WHERE id = 'never-seen-session'`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM attempts WHERE session_id = 'never-seen-session'`).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 || attempts != 1 {
+		t.Fatalf("sessions=%d attempts=%d, want 1 and 1", sessions, attempts)
+	}
+}

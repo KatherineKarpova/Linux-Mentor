@@ -221,13 +221,13 @@ func (a *App) GetLearningProgress() (LearningProgress, error) {
 	now := time.Now()
 	for _, item := range items {
 		entry := ReviewProgressItem{
-			Concept:          item.Name,
+			Concept:          item.Concept,
 			Stage:            item.Stage,
 			Attempts:         item.Attempts,
 			LastMisses:       item.LastMisses,
 			CurrentMisses:    item.CurrentMisses,
-			LastReviewed:     formatDay(item.LastAttemptAt),
-			NextReview:       formatDay(item.OkForReviewAt),
+			LastReviewed:     formatDay(item.LastReviewed),
+			NextReview:       formatDay(item.NextReview),
 			CommandAccuracy:  item.CommandAccuracy,
 			ExplanationDepth: item.ExplanationDepth,
 			Notes:            item.Notes,

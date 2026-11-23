@@ -91,6 +91,8 @@ func saveUserPreferences(
 	}, nil
 }
 
+type ReviewItem = progress.ReviewItem
+
 var store *progress.Store
 var docsStore *docs.Store
 
@@ -110,18 +112,10 @@ type searchDocsInput struct {
 	Query string `json:"query" jsonschema:"Question or Linux concept to find in the active distribution's local documentation"`
 }
 
-type docResult struct {
-	Title      string `json:"title"`
-	DistroID   string `json:"distro_id"`
-	Category   string `json:"category"`
-	SourcePath string `json:"source_path"`
-	Snippet    string `json:"snippet"`
-}
-
 type searchDocsOutput struct {
-	DistroID string      `json:"distro_id"`
-	Results  []docResult `json:"results"`
-	Message  string      `json:"message"`
+	DistroID string        `json:"distro_id"`
+	Results  []docs.Result `json:"results"`
+	Message  string        `json:"message"`
 }
 
 func searchDocs(
@@ -144,25 +138,16 @@ func searchDocs(
 	if err != nil {
 		return nil, searchDocsOutput{}, err
 	}
-	results := make([]docResult, 0, len(found))
-	for _, result := range found {
-		results = append(results, docResult{
-			Title:      result.Title,
-			DistroID:   result.DistroID,
-			Category:   result.Category,
-			SourcePath: result.SourcePath,
-			Snippet:    result.Snippet,
-		})
-	}
-	message := fmt.Sprintf("Found %d local documentation results for %q on %s", len(results), query, docsStore.DistroID())
+	distroID := docsStore.DistroID()
+	message := fmt.Sprintf("Found %d local documentation results for %q on %s", len(found), query, distroID)
 	if count == 0 {
-		message = fmt.Sprintf("No local documentation is installed or indexed for distro %q", docsStore.DistroID())
-	} else if len(results) == 0 {
-		message = fmt.Sprintf("No local documentation matched %q for distro %q", query, docsStore.DistroID())
+		message = fmt.Sprintf("No local documentation is installed or indexed for distro %q", distroID)
+	} else if len(found) == 0 {
+		message = fmt.Sprintf("No local documentation matched %q for distro %q", query, distroID)
 	}
 	return nil, searchDocsOutput{
-		DistroID: docsStore.DistroID(),
-		Results:  results,
+		DistroID: distroID,
+		Results:  found,
 		Message:  message,
 	}, nil
 }
@@ -218,9 +203,9 @@ func getLearningStatus(ctx context.Context,
 		if err != nil {
 			return nil, learningStatusOutput{}, err
 		}
-		var found *progress.Concept
+		var found *ReviewItem
 		for i := range concepts {
-			if concepts[i].Name == progress.NormalizeConcept(concept) {
+			if concepts[i].Concept == concept {
 				found = &concepts[i]
 				break
 			}
@@ -233,11 +218,11 @@ func getLearningStatus(ctx context.Context,
 		out.OkForReview = progress.ShouldReview(*found, now)
 		out.Status = found.Status
 		out.Stage = found.Stage
-		out.NextReview = found.OkForReviewAt.Format("2006-01-02")
+		out.NextReview = found.NextReview.Format("2006-01-02")
 		out.Attempts = found.Attempts
 		out.LastMisses = found.LastMisses
 		out.CurrentMisses = found.CurrentMisses
-		blocks, err := store.ReviewBlocks(ctx, found.Name)
+		blocks, err := store.ReviewBlocks(ctx, found.Concept)
 		if err != nil {
 			return nil, learningStatusOutput{}, err
 		}
@@ -255,7 +240,7 @@ func getLearningStatus(ctx context.Context,
 			})
 		}
 		out.Message = fmt.Sprintf("'%s' is %s (stage %d), eligible after %s",
-			found.Name, found.Status, found.Stage, out.NextReview)
+			found.Concept, found.Status, found.Stage, out.NextReview)
 		return nil, out, nil
 	}
 
@@ -266,13 +251,13 @@ func getLearningStatus(ctx context.Context,
 	}
 	for _, item := range concepts {
 		if item.Status == progress.StatusMastered {
-			out.Mastered = append(out.Mastered, item.Name)
+			out.Mastered = append(out.Mastered, item.Concept)
 		}
 		if item.Status == progress.StatusReinforce {
-			out.AreasToWorkOn = append(out.AreasToWorkOn, item.Name)
+			out.AreasToWorkOn = append(out.AreasToWorkOn, item.Concept)
 		}
 		if progress.ShouldReview(item, now) {
-			out.DueForReview = append(out.DueForReview, fmt.Sprintf("%s (stage %d)", item.Name, item.Stage))
+			out.DueForReview = append(out.DueForReview, fmt.Sprintf("%s (stage %d)", item.Concept, item.Stage))
 		}
 	}
 	// sort concepts alhabetically for consistency
@@ -318,13 +303,13 @@ func recordEvaluation(
 	}
 
 	msg := fmt.Sprintf("Recorded evaluation for '%s'. Stage is now %d (next review: %s)",
-		concept, item.Stage, item.OkForReviewAt.Format("2006-01-02"))
+		concept, item.Stage, item.NextReview.Format("2006-01-02"))
 
 	return nil, recordEvaluationOutput{
 		Success:    true,
 		Concept:    concept,
 		NewStage:   item.Stage,
-		NextReview: item.OkForReviewAt.Format(time.RFC3339),
+		NextReview: item.NextReview.Format(time.RFC3339),
 		Message:    msg,
 	}, nil
 }

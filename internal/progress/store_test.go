@@ -84,8 +84,11 @@ func TestSessionAndAttemptHistoryAreAssociatedAndDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if item.Name != "chmod" || item.Attempts != 1 || item.CurrentMisses != 1 ||
-		item.LastAttemptAt.IsZero() || !item.OkForReviewAt.Equal(now) {
+	if item.Concept != "chmod" || item.Attempts != 1 || item.CurrentMisses != 1 ||
+		item.LastReviewed.IsZero() || !item.NextReview.Equal(now) ||
+		item.CommandAccuracy != "incorrect mode" ||
+		item.ExplanationDepth != "confused permissions" ||
+		item.Notes != "Mixed up octal digits." {
 		t.Fatalf("unexpected progress after miss: %+v", item)
 	}
 
@@ -125,7 +128,12 @@ func TestSessionAndAttemptHistoryAreAssociatedAndDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(concepts) != 1 || concepts[0].Attempts != 1 || concepts[0].CurrentMisses != 1 {
+	if len(concepts) != 1 || concepts[0].Concept != "chmod" ||
+		concepts[0].Attempts != 1 || concepts[0].CurrentMisses != 1 ||
+		concepts[0].CommandAccuracy != "incorrect mode" ||
+		concepts[0].ExplanationDepth != "confused permissions" ||
+		concepts[0].Notes != "Mixed up octal digits." ||
+		!concepts[0].LastReviewed.Equal(now) || !concepts[0].NextReview.Equal(now) {
 		t.Fatalf("persisted concepts = %+v", concepts)
 	}
 }
@@ -263,7 +271,7 @@ func TestVersionOneDatabaseMigratesWithoutLosingProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(concepts) != 1 || concepts[0].Attempts != 1 ||
-		concepts[0].LastAttemptAt.Format("2006-01-02") != "2026-11-20" ||
+		concepts[0].LastReviewed.Format("2006-01-02") != "2026-11-20" ||
 		concepts[0].Notes != "legacy notes" {
 		t.Fatalf("migrated concepts = %+v", concepts)
 	}

@@ -1,3 +1,4 @@
+// Package progress persists learner progress, review history, sessions, and preferences in SQLite.
 package progress
 
 import (
@@ -24,6 +25,43 @@ const (
 	maxStage             = 3
 )
 
+const reviewBlocksViewSQL = `
+	CREATE VIEW review_blocks AS
+	-- A correct answer closes the current block; later answers start the next one.
+	WITH grouped_attempts AS (
+		SELECT attempts.*,
+			COALESCE(SUM(passed) OVER (
+				PARTITION BY concept_name ORDER BY id
+				ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+			), 0) AS block_number
+		FROM attempts
+	)
+	SELECT concept_name, block_number,
+		MIN(attempted_at) AS started_at,
+		MAX(attempted_at) AS last_attempt_at,
+		SUM(CASE WHEN passed = 0 THEN 1 ELSE 0 END) AS misses,
+		MAX(passed) AS passed,
+		COUNT(*) AS attempts,
+		(SELECT first_attempt.session_id FROM grouped_attempts first_attempt
+			WHERE first_attempt.concept_name = grouped_attempts.concept_name
+				AND first_attempt.block_number = grouped_attempts.block_number
+			ORDER BY first_attempt.id LIMIT 1) AS session_id,
+		(SELECT last_attempt.command_accuracy FROM grouped_attempts last_attempt
+			WHERE last_attempt.concept_name = grouped_attempts.concept_name
+				AND last_attempt.block_number = grouped_attempts.block_number
+			ORDER BY last_attempt.id DESC LIMIT 1) AS command_accuracy,
+		(SELECT last_attempt.explanation_depth FROM grouped_attempts last_attempt
+			WHERE last_attempt.concept_name = grouped_attempts.concept_name
+				AND last_attempt.block_number = grouped_attempts.block_number
+			ORDER BY last_attempt.id DESC LIMIT 1) AS explanation_depth,
+		(SELECT last_attempt.notes FROM grouped_attempts last_attempt
+			WHERE last_attempt.concept_name = grouped_attempts.concept_name
+				AND last_attempt.block_number = grouped_attempts.block_number
+			ORDER BY last_attempt.id DESC LIMIT 1) AS notes
+	FROM grouped_attempts
+	GROUP BY concept_name, block_number;
+`
+
 var intervalDays = [3][maxStage]int{
 	{14, 28, 56},
 	{2, 4, 8},
@@ -43,16 +81,13 @@ const conceptSelect = `
 		c.status,
 		COALESCE((SELECT attempted_at FROM attempts a
 			WHERE a.concept_name = c.name ORDER BY a.id DESC LIMIT 1), c.created_at),
-		(SELECT attempted_at FROM attempts a
-			WHERE a.concept_name = c.name AND a.passed = 1 ORDER BY a.id DESC LIMIT 1),
 		c.ok_for_review_at,
 		COALESCE((SELECT command_accuracy FROM attempts a
 			WHERE a.concept_name = c.name ORDER BY a.id DESC LIMIT 1), ''),
 		COALESCE((SELECT explanation_depth FROM attempts a
 			WHERE a.concept_name = c.name ORDER BY a.id DESC LIMIT 1), ''),
 		COALESCE((SELECT notes FROM attempts a
-			WHERE a.concept_name = c.name ORDER BY a.id DESC LIMIT 1), ''),
-		c.created_at
+			WHERE a.concept_name = c.name ORDER BY a.id DESC LIMIT 1), '')
 	FROM concepts c
 `
 
@@ -60,20 +95,19 @@ type Store struct {
 	db *sql.DB
 }
 
-type Concept struct {
-	Name             string
-	Stage            int
-	LastMisses       int
-	CurrentMisses    int
-	Attempts         int
-	Status           string
-	LastAttemptAt    time.Time
-	LastSuccessAt    *time.Time
-	OkForReviewAt    time.Time
-	CommandAccuracy  string
-	ExplanationDepth string
-	Notes            string
-	CreatedAt        time.Time
+// stores learning progress and review scheduling for one linux concept
+type ReviewItem struct {
+	Concept          string    `json:"concept"`
+	Stage            int       `json:"stage"`       // tracks the interval out of 3 for the status category
+	LastMisses       int       `json:"last_misses"` // wrong answers before the last correct answer, capped at 2 (0 = clean)
+	LastReviewed     time.Time `json:"last_reviewed"`
+	NextReview       time.Time `json:"next_review"` // the concept is eligible to come up again after this time
+	CommandAccuracy  string    `json:"command_accuracy,omitempty"`
+	ExplanationDepth string    `json:"explanation_depth,omitempty"`
+	Notes            string    `json:"notes,omitempty"`
+	Status           string    `json:"status"`
+	Attempts         int       `json:"attempts"`       // total graded answers for this concept
+	CurrentMisses    int       `json:"current_misses"` // wrong answers since the last correct answer
 }
 
 type Preferences struct {
@@ -153,8 +187,6 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("open SQLite database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
 
 	store := &Store{db: db}
 	if err := db.PingContext(ctx); err != nil {
@@ -274,40 +306,6 @@ func createCurrentSchema(ctx context.Context, tx *sql.Tx) error {
 			notes TEXT NOT NULL DEFAULT ''
 		);
 		CREATE INDEX attempts_concept_id_idx ON attempts(concept_name, id DESC);
-		CREATE VIEW review_blocks AS
-		-- A correct answer closes the current block; later answers start the next one.
-		WITH grouped_attempts AS (
-			SELECT attempts.*,
-				COALESCE(SUM(passed) OVER (
-					PARTITION BY concept_name ORDER BY id
-					ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-				), 0) AS block_number
-			FROM attempts
-		)
-		SELECT concept_name, block_number,
-			MIN(attempted_at) AS started_at,
-			MAX(attempted_at) AS last_attempt_at,
-			SUM(CASE WHEN passed = 0 THEN 1 ELSE 0 END) AS misses,
-			MAX(passed) AS passed,
-			COUNT(*) AS attempts,
-			(SELECT first_attempt.session_id FROM grouped_attempts first_attempt
-				WHERE first_attempt.concept_name = grouped_attempts.concept_name
-					AND first_attempt.block_number = grouped_attempts.block_number
-				ORDER BY first_attempt.id LIMIT 1) AS session_id,
-			(SELECT last_attempt.command_accuracy FROM grouped_attempts last_attempt
-				WHERE last_attempt.concept_name = grouped_attempts.concept_name
-					AND last_attempt.block_number = grouped_attempts.block_number
-				ORDER BY last_attempt.id DESC LIMIT 1) AS command_accuracy,
-			(SELECT last_attempt.explanation_depth FROM grouped_attempts last_attempt
-				WHERE last_attempt.concept_name = grouped_attempts.concept_name
-					AND last_attempt.block_number = grouped_attempts.block_number
-				ORDER BY last_attempt.id DESC LIMIT 1) AS explanation_depth,
-			(SELECT last_attempt.notes FROM grouped_attempts last_attempt
-				WHERE last_attempt.concept_name = grouped_attempts.concept_name
-					AND last_attempt.block_number = grouped_attempts.block_number
-				ORDER BY last_attempt.id DESC LIMIT 1) AS notes
-		FROM grouped_attempts
-		GROUP BY concept_name, block_number;
 		CREATE TABLE user_preferences (
 			id INTEGER PRIMARY KEY CHECK(id = 1),
 			interaction_style TEXT NOT NULL DEFAULT 'socratic',
@@ -316,6 +314,7 @@ func createCurrentSchema(ctx context.Context, tx *sql.Tx) error {
 			additional_notes TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL
 		);
+	`+reviewBlocksViewSQL+`
 	`); err != nil {
 		return fmt.Errorf("create SQLite schema: %w", err)
 	}
@@ -336,41 +335,7 @@ func migrateSchemaV2(ctx context.Context, tx *sql.Tx) error {
 		DROP TABLE concepts;
 		ALTER TABLE concepts_v3 RENAME TO concepts;
 		DROP INDEX IF EXISTS concepts_review_idx;
-		CREATE VIEW review_blocks AS
-		-- A correct answer closes the current block; later answers start the next one.
-		WITH grouped_attempts AS (
-			SELECT attempts.*,
-				COALESCE(SUM(passed) OVER (
-					PARTITION BY concept_name ORDER BY id
-					ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-				), 0) AS block_number
-			FROM attempts
-		)
-		SELECT concept_name, block_number,
-			MIN(attempted_at) AS started_at,
-			MAX(attempted_at) AS last_attempt_at,
-			SUM(CASE WHEN passed = 0 THEN 1 ELSE 0 END) AS misses,
-			MAX(passed) AS passed,
-			COUNT(*) AS attempts,
-			(SELECT first_attempt.session_id FROM grouped_attempts first_attempt
-				WHERE first_attempt.concept_name = grouped_attempts.concept_name
-					AND first_attempt.block_number = grouped_attempts.block_number
-				ORDER BY first_attempt.id LIMIT 1) AS session_id,
-			(SELECT last_attempt.command_accuracy FROM grouped_attempts last_attempt
-				WHERE last_attempt.concept_name = grouped_attempts.concept_name
-					AND last_attempt.block_number = grouped_attempts.block_number
-				ORDER BY last_attempt.id DESC LIMIT 1) AS command_accuracy,
-			(SELECT last_attempt.explanation_depth FROM grouped_attempts last_attempt
-				WHERE last_attempt.concept_name = grouped_attempts.concept_name
-					AND last_attempt.block_number = grouped_attempts.block_number
-				ORDER BY last_attempt.id DESC LIMIT 1) AS explanation_depth,
-			(SELECT last_attempt.notes FROM grouped_attempts last_attempt
-				WHERE last_attempt.concept_name = grouped_attempts.concept_name
-					AND last_attempt.block_number = grouped_attempts.block_number
-				ORDER BY last_attempt.id DESC LIMIT 1) AS notes
-		FROM grouped_attempts
-		GROUP BY concept_name, block_number;
-	`); err != nil {
+	`+reviewBlocksViewSQL); err != nil {
 		return fmt.Errorf("migrate SQLite review block schema: %w", err)
 	}
 	return nil
@@ -496,22 +461,22 @@ func (s *Store) RecordEvaluation(
 	notes string,
 	sessionID string,
 	now time.Time,
-) (Concept, error) {
+) (ReviewItem, error) {
 	name = NormalizeConcept(name)
 	stamp := formatTime(now)
 	sessionID = strings.TrimSpace(sessionID)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Concept{}, fmt.Errorf("begin evaluation transaction: %w", err)
+		return ReviewItem{}, fmt.Errorf("begin evaluation transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	item, err := getConcept(ctx, tx, name)
 	if errors.Is(err, sql.ErrNoRows) {
-		item = Concept{Name: name, Status: StatusLearning, OkForReviewAt: now, CreatedAt: now}
+		item = ReviewItem{Concept: name, Status: StatusLearning, NextReview: now}
 	} else if err != nil {
-		return Concept{}, fmt.Errorf("load concept %q: %w", name, err)
+		return ReviewItem{}, fmt.Errorf("load concept %q: %w", name, err)
 	}
 
 	if passed {
@@ -524,11 +489,11 @@ func (s *Store) RecordEvaluation(
 			item.Stage = 1
 		}
 		item.Status = statusFor(bucket, item.Stage)
-		item.OkForReviewAt = now.AddDate(0, 0, intervalDays[bucket][item.Stage-1])
+		item.NextReview = now.AddDate(0, 0, intervalDays[bucket][item.Stage-1])
 	} else {
 		item.Stage = 0
 		item.Status = StatusReinforce
-		item.OkForReviewAt = now
+		item.NextReview = now
 	}
 
 	_, err = tx.ExecContext(ctx, `
@@ -538,9 +503,9 @@ func (s *Store) RecordEvaluation(
 			stage = excluded.stage,
 			status = excluded.status,
 			ok_for_review_at = excluded.ok_for_review_at
-	`, item.Name, item.Stage, item.Status, formatTime(item.OkForReviewAt), formatTime(item.CreatedAt))
+	`, item.Concept, item.Stage, item.Status, formatTime(item.NextReview), stamp)
 	if err != nil {
-		return Concept{}, fmt.Errorf("update concept %q: %w", name, err)
+		return ReviewItem{}, fmt.Errorf("update concept %q: %w", name, err)
 	}
 
 	var attemptSessionID any
@@ -556,25 +521,25 @@ func (s *Store) RecordEvaluation(
 			concept_name, session_id, attempted_at, passed, misses_before,
 			command_accuracy, explanation_depth, notes
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, item.Name, attemptSessionID, stamp, passedValue, item.CurrentMisses,
+	`, item.Concept, attemptSessionID, stamp, passedValue, item.CurrentMisses,
 		commandAccuracy, explanationDepth, notes)
 	if err != nil {
-		return Concept{}, fmt.Errorf("save attempt for %q: %w", name, err)
+		return ReviewItem{}, fmt.Errorf("save attempt for %q: %w", name, err)
 	}
 	if sessionID != "" {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sessions SET last_seen_at = MAX(last_seen_at, ?) WHERE id = ? AND ended_at IS NULL
 		`, stamp, sessionID); err != nil {
-			return Concept{}, fmt.Errorf("update evaluation session activity: %w", err)
+			return ReviewItem{}, fmt.Errorf("update evaluation session activity: %w", err)
 		}
 	}
 
 	item, err = getConcept(ctx, tx, name)
 	if err != nil {
-		return Concept{}, fmt.Errorf("reload concept %q: %w", name, err)
+		return ReviewItem{}, fmt.Errorf("reload concept %q: %w", name, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return Concept{}, fmt.Errorf("commit evaluation for %q: %w", name, err)
+		return ReviewItem{}, fmt.Errorf("commit evaluation for %q: %w", name, err)
 	}
 	return item, nil
 }
@@ -619,14 +584,14 @@ func (s *Store) ReviewBlocks(ctx context.Context, concept string) ([]ReviewBlock
 	return blocks, nil
 }
 
-func (s *Store) Concepts(ctx context.Context) ([]Concept, error) {
+func (s *Store) Concepts(ctx context.Context) ([]ReviewItem, error) {
 	rows, err := s.db.QueryContext(ctx, conceptSelect+" ORDER BY c.name")
 	if err != nil {
 		return nil, fmt.Errorf("query concepts: %w", err)
 	}
 	defer rows.Close()
 
-	var concepts []Concept
+	var concepts []ReviewItem
 	for rows.Next() {
 		item, err := scanConcept(rows)
 		if err != nil {
@@ -646,12 +611,13 @@ func (s *Store) SavePreferences(ctx context.Context, preferences Preferences, no
 			id, interaction_style, tone, response_length, additional_notes, updated_at
 		) VALUES (1, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-			interaction_style = ?, tone = ?, response_length = ?,
-			additional_notes = ?, updated_at = excluded.updated_at
+			interaction_style = excluded.interaction_style,
+			tone = excluded.tone,
+			response_length = excluded.response_length,
+			additional_notes = excluded.additional_notes,
+			updated_at = excluded.updated_at
 	`, preferences.InteractionStyle, preferences.Tone, preferences.ResponseLength,
-		preferences.AdditionalNotes, formatTime(now),
-		preferences.InteractionStyle, preferences.Tone, preferences.ResponseLength,
-		preferences.AdditionalNotes)
+		preferences.AdditionalNotes, formatTime(now))
 	if err != nil {
 		return fmt.Errorf("save user preferences: %w", err)
 	}
@@ -684,8 +650,8 @@ func NormalizeConcept(name string) string {
 	return name
 }
 
-func ShouldReview(item Concept, now time.Time) bool {
-	return !now.Before(item.OkForReviewAt)
+func ShouldReview(item ReviewItem, now time.Time) bool {
+	return !now.Before(item.NextReview)
 }
 
 func statusFor(bucket, stage int) string {
@@ -709,7 +675,7 @@ func missBucket(misses int) int {
 	return misses
 }
 
-func getConcept(ctx context.Context, tx *sql.Tx, name string) (Concept, error) {
+func getConcept(ctx context.Context, tx *sql.Tx, name string) (ReviewItem, error) {
 	return scanConcept(tx.QueryRowContext(ctx, conceptSelect+" WHERE c.name = ?", name))
 }
 
@@ -717,32 +683,21 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
-func scanConcept(row scanner) (Concept, error) {
-	var item Concept
-	var lastAttempt, lastSuccess, reviewAt, createdAt sql.NullString
+func scanConcept(row scanner) (ReviewItem, error) {
+	var item ReviewItem
+	var lastAttempt, reviewAt sql.NullString
 	if err := row.Scan(
-		&item.Name, &item.Stage, &item.LastMisses, &item.CurrentMisses, &item.Attempts, &item.Status,
-		&lastAttempt, &lastSuccess, &reviewAt, &item.CommandAccuracy, &item.ExplanationDepth, &item.Notes,
-		&createdAt,
+		&item.Concept, &item.Stage, &item.LastMisses, &item.CurrentMisses, &item.Attempts, &item.Status,
+		&lastAttempt, &reviewAt, &item.CommandAccuracy, &item.ExplanationDepth, &item.Notes,
 	); err != nil {
-		return Concept{}, err
+		return ReviewItem{}, err
 	}
 	var err error
-	if item.LastAttemptAt, err = parseNullTime(lastAttempt); err != nil {
-		return Concept{}, err
+	if item.LastReviewed, err = parseNullTime(lastAttempt); err != nil {
+		return ReviewItem{}, err
 	}
-	if lastSuccess.Valid {
-		value, err := parseTime(lastSuccess.String)
-		if err != nil {
-			return Concept{}, err
-		}
-		item.LastSuccessAt = &value
-	}
-	if item.OkForReviewAt, err = parseNullTime(reviewAt); err != nil {
-		return Concept{}, err
-	}
-	if item.CreatedAt, err = parseNullTime(createdAt); err != nil {
-		return Concept{}, err
+	if item.NextReview, err = parseNullTime(reviewAt); err != nil {
+		return ReviewItem{}, err
 	}
 	return item, nil
 }

@@ -1,3 +1,4 @@
+// Package docs indexes local documentation in SQLite and searches it by distro and query.
 package docs
 
 import (
@@ -40,11 +41,11 @@ type Store struct {
 }
 
 type Result struct {
-	DistroID   string
-	Title      string
-	Category   string
-	SourcePath string
-	Snippet    string
+	DistroID   string `json:"distro_id"`
+	Title      string `json:"title"`
+	Category   string `json:"category"`
+	SourcePath string `json:"source_path"`
+	Snippet    string `json:"snippet"`
 }
 
 type sourceFile struct {
@@ -130,8 +131,6 @@ func Open(ctx context.Context, path string, release Release, roots []string) (*S
 		return nil, fmt.Errorf("open documentation SQLite database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
 
 	store := &Store{db: db, release: release}
 	if err := db.PingContext(ctx); err != nil {
@@ -533,14 +532,6 @@ func (s *Store) Search(ctx context.Context, query string, limit int) ([]Result, 
 	if limit < 1 || limit > maxResultLimit {
 		limit = defaultResultLimit
 	}
-	documentCount, err := s.DocumentCount(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if documentCount == 0 {
-		return []Result{}, nil
-	}
-
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(tokens)), ",")
 	args := make([]any, 0, len(tokens)+3)
 	args = append(args, s.release.ID, s.release.ID)

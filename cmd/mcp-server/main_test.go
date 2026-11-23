@@ -53,12 +53,12 @@ func TestRecordEvaluationNormalizesNamesAndPersistsAttemptHistory(t *testing.T) 
 		t.Fatalf("got %d concepts, want 1", len(concepts))
 	}
 	item := concepts[0]
-	if item.Name != "chmod" || item.Attempts != 2 || item.Stage != 0 ||
+	if item.Concept != "chmod" || item.Attempts != 2 || item.Stage != 0 ||
 		item.CurrentMisses != 1 || item.LastMisses != 0 || item.Status != progress.StatusReinforce {
 		t.Fatalf("unexpected concept progress: %+v", item)
 	}
-	if item.LastAttemptAt.IsZero() || !item.OkForReviewAt.Equal(item.LastAttemptAt) {
-		t.Fatalf("last attempt %v, review eligibility %v", item.LastAttemptAt, item.OkForReviewAt)
+	if item.LastReviewed.IsZero() || !item.NextReview.Equal(item.LastReviewed) {
+		t.Fatalf("last review %v, review eligibility %v", item.LastReviewed, item.NextReview)
 	}
 	blocks, err := store.ReviewBlocks(context.Background(), "chmod")
 	if err != nil {
@@ -89,7 +89,7 @@ func TestProgressSurvivesRestartAndDatabaseIsLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(concepts) != 1 || concepts[0].Name != "grep" ||
+	if len(concepts) != 1 || concepts[0].Concept != "grep" ||
 		concepts[0].Status != progress.StatusReview || concepts[0].Stage != 1 ||
 		concepts[0].Attempts != 2 || concepts[0].CurrentMisses != 0 {
 		t.Fatalf("after reopening database: %+v", concepts)

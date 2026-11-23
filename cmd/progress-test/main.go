@@ -92,10 +92,10 @@ func run(databasePath string) error {
 	for _, item := range concepts {
 		fmt.Printf(
 			"%-16s stage=%d status=%-10s attempts=%d last-misses(capped at 2)=%d current-misses=%d next-review=%s\n",
-			item.Name, item.Stage, item.Status, item.Attempts, item.LastMisses,
-			item.CurrentMisses, item.OkForReviewAt.Format("2006-01-02"),
+			item.Concept, item.Stage, item.Status, item.Attempts, item.LastMisses,
+			item.CurrentMisses, item.NextReview.Format("2006-01-02"),
 		)
-		blocks, err := store.ReviewBlocks(ctx, item.Name)
+		blocks, err := store.ReviewBlocks(ctx, item.Concept)
 		if err != nil {
 			return err
 		}
@@ -113,7 +113,7 @@ func run(databasePath string) error {
 	return nil
 }
 
-func verifyConcepts(ctx context.Context, store *progress.Store, concepts []progress.Concept, now time.Time) error {
+func verifyConcepts(ctx context.Context, store *progress.Store, concepts []progress.ReviewItem, now time.Time) error {
 	want := map[string]struct {
 		stage         int
 		status        string
@@ -144,13 +144,13 @@ func verifyConcepts(ctx context.Context, store *progress.Store, concepts []progr
 		return fmt.Errorf("stored %d concepts, want %d", len(concepts), len(want))
 	}
 	for _, item := range concepts {
-		expected, ok := want[item.Name]
+		expected, ok := want[item.Concept]
 		if !ok || item.Stage != expected.stage || item.Status != expected.status ||
 			item.Attempts != expected.attempts ||
 			item.LastMisses != expected.lastMisses || item.CurrentMisses != expected.currentMisses ||
-			!item.LastAttemptAt.Equal(expected.lastAttemptAt) ||
-			!item.OkForReviewAt.Equal(expected.nextReviewAt) {
-			return fmt.Errorf("unexpected persisted score for %q: %+v", item.Name, item)
+			!item.LastReviewed.Equal(expected.lastAttemptAt) ||
+			!item.NextReview.Equal(expected.nextReviewAt) {
+			return fmt.Errorf("unexpected persisted score for %q: %+v", item.Concept, item)
 		}
 	}
 	expectedBlocks := map[string][]int{
@@ -160,18 +160,18 @@ func verifyConcepts(ctx context.Context, store *progress.Store, concepts []progr
 		"unresolved":    {3},
 	}
 	for _, item := range concepts {
-		blocks, err := store.ReviewBlocks(ctx, item.Name)
+		blocks, err := store.ReviewBlocks(ctx, item.Concept)
 		if err != nil {
 			return err
 		}
-		expected := expectedBlocks[item.Name]
+		expected := expectedBlocks[item.Concept]
 		if len(blocks) != len(expected) {
-			return fmt.Errorf("%q has %d review blocks, want %d", item.Name, len(blocks), len(expected))
+			return fmt.Errorf("%q has %d review blocks, want %d", item.Concept, len(blocks), len(expected))
 		}
 		for i, block := range blocks {
 			if block.Misses != expected[i] {
 				return fmt.Errorf("%q review block %d has %d misses, want %d",
-					item.Name, i+1, block.Misses, expected[i])
+					item.Concept, i+1, block.Misses, expected[i])
 			}
 		}
 	}

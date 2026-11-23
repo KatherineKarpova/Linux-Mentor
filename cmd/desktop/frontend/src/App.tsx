@@ -13,6 +13,9 @@ type MentorMessage = {
 type ReviewProgressItem = {
   concept: string;
   stage: number;
+  attempts: number;
+  lastMisses: number;
+  currentMisses: number;
   lastReviewed: string;
   nextReview: string;
   commandAccuracy?: string;
@@ -324,6 +327,9 @@ function App() {
                         </span>
                       </div>
                       {item.notes && <p style={{ margin: "6px 0 0", color: "#d1d5db", fontSize: "12px" }}>{item.notes}</p>}
+                      <p style={{ margin: "6px 0 0", color: "#b7a3a3", fontSize: "11px" }}>
+                        {item.attempts} attempts · {item.lastMisses} misses in previous review · {item.currentMisses} current misses
+                      </p>
                     </li>
                   ))}
                 </ul>
@@ -358,6 +364,9 @@ function App() {
                         <strong style={{ color: "#fde047" }}>{item.concept}</strong>
                         <span style={{ display: "block", color: "#999e91", fontSize: "11px" }}>
                           Due: {item.nextReview} (Current Stage: {item.stage})
+                        </span>
+                        <span style={{ display: "block", color: "#999e91", fontSize: "11px" }}>
+                          {item.attempts} attempts · {item.lastMisses} misses in previous review
                         </span>
                       </div>
                       <span style={{ fontSize: "12px", color: "#fef08a", background: "#443c29", padding: "3px 8px", borderRadius: "4px" }}>

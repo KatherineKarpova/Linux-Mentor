@@ -57,3 +57,4 @@ go*.linux-amd64.tar.gz
 *.tar.gz
 
 cmd/desktop/frontend/package.json.md5
+dist/

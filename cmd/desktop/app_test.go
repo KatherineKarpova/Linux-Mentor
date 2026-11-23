@@ -1,10 +1,55 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"linux-mentor/internal/progress"
 )
+
+func TestStartupCreatesLocalDatabaseAndTracksConversationSession(t *testing.T) {
+	stateHome := t.TempDir()
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	t.Setenv("LINUX_MENTOR_CONVERSATION_ID", "conversation-456")
+	t.Setenv("LINUX_MENTOR_TRANSCRIPT_PATH", transcriptPath)
+
+	app := NewApp()
+	ctx, cancel := context.WithCancel(context.Background())
+	app.startup(ctx)
+
+	sessions, err := app.progressStore.Sessions(context.Background())
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "conversation-456" || sessions[0].EndedAt != nil {
+		cancel()
+		t.Fatalf("startup sessions = %+v", sessions)
+	}
+	if _, err := os.Stat(filepath.Join(stateHome, "linux-mentor", "progress.db")); err != nil {
+		cancel()
+		t.Fatalf("startup did not create local database: %v", err)
+	}
+
+	cancel()
+	app.shutdown(context.Background())
+	reopened, err := progress.OpenDefault(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	sessions, err = reopened.Sessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].EndedAt == nil || sessions[0].EndedAt.Before(time.Now().Add(-time.Minute)) {
+		t.Fatalf("shutdown did not persist session end: %+v", sessions)
+	}
+}
 
 func TestReadTranscriptShowsCompletedModelResponsesOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "transcript.jsonl")

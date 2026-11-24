@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,5 +111,57 @@ func TestReadTranscriptWaitsForCompleteLine(t *testing.T) {
 	messages := app.GetMessages()
 	if len(messages) != 1 || messages[0].Content != "hello world" {
 		t.Fatalf("got messages %#v, want one completed response", messages)
+	}
+}
+
+func TestLearningProgressPutsEveryConceptInOneGroup(t *testing.T) {
+	ctx := context.Background()
+	store, err := progress.Open(ctx, filepath.Join(t.TempDir(), "progress.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC()
+	record := func(concept string, passed bool, at time.Time) {
+		t.Helper()
+		if _, err := store.RecordEvaluation(ctx, concept, passed, "", "", "", "", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record("chmod", true, now.AddDate(0, 0, -15)) // clean, review date passed
+	record("grep", true, now)                     // clean, next review in 14 days
+	record("alias", false, now)                   // wrong, not yet corrected
+	record("ls", true, now.AddDate(0, 0, -100))
+	record("ls", true, now.AddDate(0, 0, -86))
+	record("ls", true, now.AddDate(0, 0, -58)) // three clean reviews
+
+	app := &App{progressStore: store}
+	got, err := app.GetLearningProgress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := func(items []ReviewProgressItem) []string {
+		out := []string{}
+		for _, item := range items {
+			out = append(out, item.Concept)
+		}
+		return out
+	}
+	check := func(group string, items []ReviewProgressItem, want ...string) {
+		t.Helper()
+		if gotNames := names(items); strings.Join(gotNames, ",") != strings.Join(want, ",") {
+			t.Errorf("%s = %v, want %v", group, gotNames, want)
+		}
+	}
+	check("due", got.DueForReview, "chmod")
+	check("scheduled", got.Scheduled, "grep")
+	check("needs work", got.AreasToWorkOn, "alias")
+	check("mastered", got.Mastered, "ls")
+	if len(got.AllItems) != 4 {
+		t.Errorf("all items = %d, want 4", len(got.AllItems))
+	}
+	if !got.DueForReview[0].Due || got.DueForReview[0].Status != progress.StatusLearning {
+		t.Errorf("due item = %+v", got.DueForReview[0])
 	}
 }

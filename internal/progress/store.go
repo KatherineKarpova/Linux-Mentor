@@ -21,16 +21,18 @@ const (
 	StatusReview    = "review"
 	StatusReinforce = "reinforce"
 
-	currentSchemaVersion = 3
+	currentSchemaVersion = 4
 	maxStage             = 3
 )
 
 const reviewBlocksViewSQL = `
 	CREATE VIEW review_blocks AS
-	-- A correct answer closes the current block; later answers start the next one.
+	-- A correct answer that counted as a review closes the current block; later
+	-- answers start the next one. Early correct answers (practice before the review
+	-- date) stay inside the open block and never close it.
 	WITH grouped_attempts AS (
 		SELECT attempts.*,
-			COALESCE(SUM(passed) OVER (
+			COALESCE(SUM(CASE WHEN passed = 1 AND early = 0 THEN 1 ELSE 0 END) OVER (
 				PARTITION BY concept_name ORDER BY id
 				ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
 			), 0) AS block_number
@@ -40,7 +42,7 @@ const reviewBlocksViewSQL = `
 		MIN(attempted_at) AS started_at,
 		MAX(attempted_at) AS last_attempt_at,
 		SUM(CASE WHEN passed = 0 THEN 1 ELSE 0 END) AS misses,
-		MAX(passed) AS passed,
+		MAX(CASE WHEN passed = 1 AND early = 0 THEN 1 ELSE 0 END) AS passed,
 		COUNT(*) AS attempts,
 		(SELECT first_attempt.session_id FROM grouped_attempts first_attempt
 			WHERE first_attempt.concept_name = grouped_attempts.concept_name
@@ -62,6 +64,8 @@ const reviewBlocksViewSQL = `
 	GROUP BY concept_name, block_number;
 `
 
+// Days until the next review, by how many wrong answers came before the correct
+// one (row: 0, 1, or 2+) and by stage (column: stage 1, 2, 3).
 var intervalDays = [3][maxStage]int{
 	{14, 28, 56},
 	{2, 4, 8},
@@ -87,7 +91,9 @@ const conceptSelect = `
 		COALESCE((SELECT explanation_depth FROM attempts a
 			WHERE a.concept_name = c.name ORDER BY a.id DESC LIMIT 1), ''),
 		COALESCE((SELECT notes FROM attempts a
-			WHERE a.concept_name = c.name ORDER BY a.id DESC LIMIT 1), '')
+			WHERE a.concept_name = c.name ORDER BY a.id DESC LIMIT 1), ''),
+		COALESCE((SELECT early FROM attempts a
+			WHERE a.concept_name = c.name ORDER BY a.id DESC LIMIT 1), 0)
 	FROM concepts c
 `
 
@@ -106,8 +112,9 @@ type ReviewItem struct {
 	ExplanationDepth string    `json:"explanation_depth,omitempty"`
 	Notes            string    `json:"notes,omitempty"`
 	Status           string    `json:"status"`
-	Attempts         int       `json:"attempts"`       // total graded answers for this concept
-	CurrentMisses    int       `json:"current_misses"` // wrong answers since the last correct answer
+	Attempts         int       `json:"attempts"`          // total graded answers for this concept
+	CurrentMisses    int       `json:"current_misses"`    // wrong answers since the last correct answer
+	LastAnswerEarly  bool      `json:"last_answer_early"` // the newest answer was correct but came before the review date
 }
 
 type Preferences struct {
@@ -244,16 +251,23 @@ func (s *Store) migrate(ctx context.Context) (resultErr error) {
 		if err := createCurrentSchema(ctx, tx); err != nil {
 			return err
 		}
-	case 1:
-		if err := migrateSchemaV1(ctx, tx); err != nil {
+	case 1, 2, 3:
+		// each step upgrades one version; older databases run every later step too
+		if version <= 1 {
+			if err := migrateSchemaV1(ctx, tx); err != nil {
+				return err
+			}
+		}
+		if version <= 2 {
+			if err := migrateSchemaV2(ctx, tx); err != nil {
+				return err
+			}
+		}
+		if err := migrateSchemaV3(ctx, tx); err != nil {
 			return err
 		}
-		if err := migrateSchemaV2(ctx, tx); err != nil {
-			return err
-		}
-	case 2:
-		if err := migrateSchemaV2(ctx, tx); err != nil {
-			return err
+		if _, err := tx.ExecContext(ctx, `DROP VIEW IF EXISTS review_blocks;`+reviewBlocksViewSQL); err != nil {
+			return fmt.Errorf("rebuild SQLite review blocks view: %w", err)
 		}
 	case currentSchemaVersion:
 	default:
@@ -303,7 +317,8 @@ func createCurrentSchema(ctx context.Context, tx *sql.Tx) error {
 			misses_before INTEGER NOT NULL CHECK(misses_before >= 0),
 			command_accuracy TEXT NOT NULL DEFAULT '',
 			explanation_depth TEXT NOT NULL DEFAULT '',
-			notes TEXT NOT NULL DEFAULT ''
+			notes TEXT NOT NULL DEFAULT '',
+			early INTEGER NOT NULL DEFAULT 0 CHECK(early IN (0, 1))
 		);
 		CREATE INDEX attempts_concept_id_idx ON attempts(concept_name, id DESC);
 		CREATE TABLE user_preferences (
@@ -317,6 +332,17 @@ func createCurrentSchema(ctx context.Context, tx *sql.Tx) error {
 	`+reviewBlocksViewSQL+`
 	`); err != nil {
 		return fmt.Errorf("create SQLite schema: %w", err)
+	}
+	return nil
+}
+
+// version 3 -> 4: mark correct answers given before the review date
+func migrateSchemaV3(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `
+		DROP VIEW IF EXISTS review_blocks;
+		ALTER TABLE attempts ADD COLUMN early INTEGER NOT NULL DEFAULT 0 CHECK(early IN (0, 1));
+	`); err != nil {
+		return fmt.Errorf("migrate SQLite early-answer schema: %w", err)
 	}
 	return nil
 }
@@ -335,7 +361,7 @@ func migrateSchemaV2(ctx context.Context, tx *sql.Tx) error {
 		DROP TABLE concepts;
 		ALTER TABLE concepts_v3 RENAME TO concepts;
 		DROP INDEX IF EXISTS concepts_review_idx;
-	`+reviewBlocksViewSQL); err != nil {
+	`); err != nil {
 		return fmt.Errorf("migrate SQLite review block schema: %w", err)
 	}
 	return nil
@@ -452,6 +478,22 @@ func (s *Store) Sessions(ctx context.Context) ([]Session, error) {
 	return sessions, nil
 }
 
+// RecordEvaluation saves one graded answer and updates the concept's schedule.
+//
+// The rule (spaced repetition):
+//   - Every answer is saved in the history.
+//   - A wrong answer always counts: the concept drops to stage 0, is marked
+//     "reinforce", and is due again right away.
+//   - A correct answer counts as a review only when the concept is due (its first
+//     answer, right after a miss, or on/after its review date). A correct answer
+//     before the review date is practice: it is saved with early=1 but changes
+//     nothing, so a concept can't be mastered by answering it 3 times in a row.
+//   - A counted correct answer closes a review. How many wrong answers came before
+//     it (0, 1, or 2+) picks the interval row; repeating the same row as the
+//     previous review moves to the next stage (1 -> 2 -> 3), a different row
+//     restarts at stage 1. See intervalDays.
+//   - Mastered = stage 3 with no wrong answers: three clean reviews in a row, each
+//     on a later day (14, then 28, then 56 days apart).
 func (s *Store) RecordEvaluation(
 	ctx context.Context,
 	name string,
@@ -479,7 +521,12 @@ func (s *Store) RecordEvaluation(
 		return ReviewItem{}, fmt.Errorf("load concept %q: %w", name, err)
 	}
 
-	if passed {
+	// a correct answer before the review date is practice, not a review
+	early := passed && now.Before(item.NextReview)
+
+	if early {
+		// keep the current stage, status, and review date
+	} else if passed {
 		bucket := missBucket(item.CurrentMisses)
 		if item.Stage >= 1 && bucket == missBucket(item.LastMisses) {
 			if item.Stage < maxStage {
@@ -523,17 +570,20 @@ func (s *Store) RecordEvaluation(
 			return ReviewItem{}, fmt.Errorf("save evaluation session %q: %w", sessionID, err)
 		}
 	}
-	var passedValue int
+	var passedValue, earlyValue int
 	if passed {
 		passedValue = 1
+	}
+	if early {
+		earlyValue = 1
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO attempts(
 			concept_name, session_id, attempted_at, passed, misses_before,
-			command_accuracy, explanation_depth, notes
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			command_accuracy, explanation_depth, notes, early
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, item.Concept, attemptSessionID, stamp, passedValue, item.CurrentMisses,
-		commandAccuracy, explanationDepth, notes)
+		commandAccuracy, explanationDepth, notes, earlyValue)
 	if err != nil {
 		return ReviewItem{}, fmt.Errorf("save attempt for %q: %w", name, err)
 	}
@@ -692,6 +742,7 @@ func scanConcept(row scanner) (ReviewItem, error) {
 	if err := row.Scan(
 		&item.Concept, &item.Stage, &item.LastMisses, &item.CurrentMisses, &item.Attempts, &item.Status,
 		&lastAttempt, &reviewAt, &item.CommandAccuracy, &item.ExplanationDepth, &item.Notes,
+		&item.LastAnswerEarly,
 	); err != nil {
 		return ReviewItem{}, err
 	}

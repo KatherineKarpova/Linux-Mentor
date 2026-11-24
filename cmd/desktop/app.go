@@ -169,7 +169,9 @@ func (a *App) GetMessages() []MentorMessage {
 // progress information for one linux-related concept displayed in the ui
 type ReviewProgressItem struct {
 	Concept          string `json:"concept"`
-	Stage            int    `json:"stage"`
+	Status           string `json:"status"` // learning, review, reinforce, or mastered
+	Due              bool   `json:"due"`    // the review date has arrived
+	Stage            int    `json:"stage"`  // clean-review steps toward mastery, 0 to 3
 	Attempts         int    `json:"attempts"`
 	LastMisses       int    `json:"lastMisses"`
 	CurrentMisses    int    `json:"currentMisses"`
@@ -184,6 +186,7 @@ type LearningProgress struct {
 	DueForReview  []ReviewProgressItem `json:"dueForReview"`
 	Mastered      []ReviewProgressItem `json:"mastered"`
 	AreasToWorkOn []ReviewProgressItem `json:"areasToWorkOn"`
+	Scheduled     []ReviewProgressItem `json:"scheduled"` // in progress, next review still ahead
 	AllItems      []ReviewProgressItem `json:"allItems"`
 }
 
@@ -202,6 +205,7 @@ func (a *App) GetLearningProgress() (LearningProgress, error) {
 		DueForReview:  []ReviewProgressItem{},
 		Mastered:      []ReviewProgressItem{},
 		AreasToWorkOn: []ReviewProgressItem{},
+		Scheduled:     []ReviewProgressItem{},
 		AllItems:      []ReviewProgressItem{},
 	}
 
@@ -222,6 +226,8 @@ func (a *App) GetLearningProgress() (LearningProgress, error) {
 	for _, item := range items {
 		entry := ReviewProgressItem{
 			Concept:          item.Concept,
+			Status:           item.Status,
+			Due:              progress.ShouldReview(item, now),
 			Stage:            item.Stage,
 			Attempts:         item.Attempts,
 			LastMisses:       item.LastMisses,
@@ -234,16 +240,17 @@ func (a *App) GetLearningProgress() (LearningProgress, error) {
 		}
 		result.AllItems = append(result.AllItems, entry)
 
-		// group concepts by status and check whether reviews are due
-		switch item.Status {
-		case progress.StatusMastered:
+		// every concept lands in exactly one group: mastered, needs work (wrong
+		// answers since the last correct one), due for review, or scheduled later
+		switch {
+		case item.Status == progress.StatusMastered:
 			result.Mastered = append(result.Mastered, entry)
-		case progress.StatusReinforce:
+		case item.Status == progress.StatusReinforce:
 			result.AreasToWorkOn = append(result.AreasToWorkOn, entry)
-		case progress.StatusReview:
-			if progress.ShouldReview(item, now) {
-				result.DueForReview = append(result.DueForReview, entry)
-			}
+		case entry.Due:
+			result.DueForReview = append(result.DueForReview, entry)
+		default:
+			result.Scheduled = append(result.Scheduled, entry)
 		}
 	}
 	return result, nil

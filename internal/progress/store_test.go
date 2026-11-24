@@ -161,7 +161,8 @@ func TestReviewBlocksRetainExactMissesBetweenSuccessfulReviews(t *testing.T) {
 		t.Fatalf("progress after four misses then success = %+v", item)
 	}
 
-	if _, err := store.RecordEvaluation(ctx, "chmod", true, "", "", "", "", now.AddDate(0, 0, 1)); err != nil {
+	// the next review is due one day after the success above
+	if _, err := store.RecordEvaluation(ctx, "chmod", true, "", "", "", "", now.Add(4*time.Minute).AddDate(0, 0, 1)); err != nil {
 		t.Fatal(err)
 	}
 	blocks, err := store.ReviewBlocks(ctx, "chmod")
@@ -348,5 +349,132 @@ func TestEvaluationWithUnknownSessionCreatesIt(t *testing.T) {
 	}
 	if sessions != 1 || attempts != 1 {
 		t.Fatalf("sessions=%d attempts=%d, want 1 and 1", sessions, attempts)
+	}
+}
+
+func openTestStore(t *testing.T) (*Store, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "progress.db")
+	store, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store, path
+}
+
+func answer(t *testing.T, store *Store, concept string, passed bool, at time.Time) ReviewItem {
+	t.Helper()
+	item, err := store.RecordEvaluation(context.Background(), concept, passed, "", "", "", "", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return item
+}
+
+func TestQuickCorrectAnswersDoNotMasterAConcept(t *testing.T) {
+	store, _ := openTestStore(t)
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+
+	answer(t, store, "path", true, now)
+	answer(t, store, "path", true, now.Add(time.Minute))
+	item := answer(t, store, "path", true, now.Add(2*time.Minute))
+
+	if item.Stage != 1 || item.Status != StatusLearning || item.Attempts != 3 || !item.LastAnswerEarly {
+		t.Fatalf("three correct answers in two minutes = %+v, want stage 1 learning with the last answer early", item)
+	}
+	if want := now.AddDate(0, 0, 14); !item.NextReview.Equal(want) {
+		t.Errorf("next review = %v, want %v (unchanged by practice)", item.NextReview, want)
+	}
+}
+
+func TestCleanReviewsOnSeparateDaysMasterAConcept(t *testing.T) {
+	store, _ := openTestStore(t)
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+
+	answer(t, store, "path", true, now)
+	answer(t, store, "path", true, now.AddDate(0, 0, 14))
+	item := answer(t, store, "path", true, now.AddDate(0, 0, 14+28))
+
+	if item.Stage != 3 || item.Status != StatusMastered || item.LastAnswerEarly {
+		t.Fatalf("three clean on-time reviews = %+v, want mastered", item)
+	}
+}
+
+func TestEarlyPracticeDoesNotChangeMissHistory(t *testing.T) {
+	store, _ := openTestStore(t)
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+
+	answer(t, store, "path", false, now)
+	reviewed := answer(t, store, "path", true, now.Add(time.Minute)) // one miss: due in 2 days
+	answer(t, store, "path", true, now.Add(time.Hour))               // practice
+	item := answer(t, store, "path", true, reviewed.NextReview)      // clean review, on time
+
+	// the clean review follows a one-miss review, so it restarts at stage 1;
+	// if the practice answer had closed a review, this would wrongly be stage 2
+	if item.Stage != 1 || item.Status != StatusLearning || item.LastMisses != 0 {
+		t.Fatalf("clean review after a one-miss review = %+v, want stage 1 learning", item)
+	}
+	blocks, err := store.ReviewBlocks(context.Background(), "path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 2 || blocks[0].Misses != 1 || !blocks[0].Passed ||
+		blocks[1].Misses != 0 || !blocks[1].Passed || blocks[1].Attempts != 2 {
+		t.Fatalf("review blocks = %+v, want [1 miss, passed] then [practice + clean review]", blocks)
+	}
+}
+
+func TestWrongAnswerBeforeReviewDateStillResets(t *testing.T) {
+	store, _ := openTestStore(t)
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+
+	answer(t, store, "path", true, now)
+	answer(t, store, "path", true, now.AddDate(0, 0, 14)) // stage 2
+	item := answer(t, store, "path", false, now.AddDate(0, 0, 15))
+
+	if item.Stage != 0 || item.Status != StatusReinforce || item.CurrentMisses != 1 ||
+		!item.NextReview.Equal(now.AddDate(0, 0, 15)) {
+		t.Fatalf("wrong answer before the review date = %+v, want stage 0 reinforce, due now", item)
+	}
+}
+
+func TestVersionThreeDatabaseMigratesWithoutLosingProgress(t *testing.T) {
+	ctx := context.Background()
+	store, path := openTestStore(t)
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	answer(t, store, "path", false, now)
+	answer(t, store, "path", true, now.Add(time.Minute))
+
+	// turn it back into a version 3 database: no early column, old view
+	if _, err := store.db.ExecContext(ctx, `
+		DROP VIEW review_blocks;
+		ALTER TABLE attempts DROP COLUMN early;
+		CREATE VIEW review_blocks AS SELECT 1 AS placeholder;
+		DELETE FROM schema_migrations WHERE version = 4;
+		INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, 'x');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open version 3 database: %v", err)
+	}
+	defer reopened.Close()
+	items, err := reopened.Concepts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Attempts != 2 || items[0].LastMisses != 1 || items[0].Stage != 1 {
+		t.Fatalf("progress after migrating = %+v", items)
+	}
+	var version int
+	if err := reopened.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != currentSchemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, currentSchemaVersion)
 	}
 }

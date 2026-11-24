@@ -12,7 +12,9 @@ type MentorMessage = {
 
 type ReviewProgressItem = {
   concept: string;
-  stage: number;
+  status: string; // learning, review, reinforce, or mastered
+  due: boolean;
+  stage: number; // clean-review steps toward mastery, 0 to 3
   attempts: number;
   lastMisses: number;
   currentMisses: number;
@@ -27,6 +29,7 @@ type LearningProgress = {
   dueForReview: ReviewProgressItem[];
   mastered: ReviewProgressItem[];
   areasToWorkOn: ReviewProgressItem[];
+  scheduled: ReviewProgressItem[];
   allItems: ReviewProgressItem[];
 };
 
@@ -58,6 +61,39 @@ export function extractCommands(text: string): string[] {
   return found;
 }
 
+const statusLabels: Record<string, string> = {
+  learning: "Learning",
+  review: "Needs review",
+  reinforce: "Needs work",
+  mastered: "Mastered",
+};
+
+// One plain-language line about where a concept stands. Mastery takes three clean
+// reviews (no wrong answers first) on separate days: 14, 28, then 56 days apart,
+// sooner after wrong answers. Correct answers before the review date are practice.
+export function describeProgress(item: ReviewProgressItem): string {
+  const label = statusLabels[item.status] ?? item.status;
+  if (item.status === "mastered") return `${label} · 3 of 3 clean reviews`;
+  if (item.status === "reinforce" && item.currentMisses > 0) {
+    return `${label} · answer it correctly to schedule the next review`;
+  }
+  const when = item.due ? "review due now" : `next review ${item.nextReview}`;
+  // only the clean track counts toward mastery; after wrong answers it starts over
+  const clean = item.status === "learning" ? item.stage : 0;
+  return `${label} · ${clean} of 3 clean reviews · ${when}`;
+}
+
+export function describeAnswers(item: ReviewProgressItem): string {
+  const answers = `${item.attempts} ${item.attempts === 1 ? "answer" : "answers"}`;
+  if (item.currentMisses > 0) {
+    return `${answers} · ${item.currentMisses} wrong since the last correct answer`;
+  }
+  if (item.lastMisses > 0) {
+    return `${answers} · last review was correct after ${item.lastMisses === 2 ? "2 or more" : "1"} wrong`;
+  }
+  return answers;
+}
+
 export function cleanContent(text: string): string {
   return text.replace(/<!--\s*study:[^>]*-->/g, "").trim();
 }
@@ -74,6 +110,7 @@ function App() {
     dueForReview: [],
     mastered: [],
     areasToWorkOn: [],
+    scheduled: [],
     allItems: [],
   });
 
@@ -103,6 +140,7 @@ function App() {
             dueForReview: learningProgress.dueForReview || [],
             mastered: learningProgress.mastered || [],
             areasToWorkOn: learningProgress.areasToWorkOn || [],
+            scheduled: learningProgress.scheduled || [],
             allItems: learningProgress.allItems || [],
           });
         }
@@ -125,6 +163,7 @@ function App() {
   const dueItems = progress.dueForReview || [];
   const areasItems = progress.areasToWorkOn || [];
   const masteredItems = progress.mastered || [];
+  const scheduledItems = progress.scheduled || [];
 
   const commands = useMemo(
     () => [...new Set(messages.flatMap((m) => extractCommands(m.content)))],
@@ -208,6 +247,10 @@ function App() {
               <strong style={{ color: areasCount > 0 ? "#ea8a8a" : "#999e91" }}>
                 {areasCount}
               </strong>
+            </li>
+            <li style={{ display: "flex", justifyContent: "space-between", fontSize: "13px" }}>
+              <span style={{ color: "#999e91" }}>Coming Up:</span>
+              <strong style={{ color: "#9cc3e6" }}>{scheduledItems.length}</strong>
             </li>
             <li style={{ display: "flex", justifyContent: "space-between", fontSize: "13px" }}>
               <span style={{ color: "#999e91" }}>Mastered:</span>
@@ -302,11 +345,11 @@ function App() {
             {/* Areas to Work On */}
             <div style={{ background: "#1a1b1d", border: "1px solid #2d2f32", borderRadius: "12px", padding: "20px" }}>
               <h2 style={{ margin: "0 0 14px", fontSize: "16px", color: "#ea8a8a" }}>
-                Areas to Work On (Needs Reinforcement)
+                Areas to Work On
               </h2>
               {areasCount === 0 ? (
                 <p style={{ color: "#8a8f94", margin: 0, fontSize: "13px" }}>
-                  No flagged trouble spots. When a question is missed, the concept falls back here for focused practice.
+                  No trouble spots. When an answer is wrong, the concept comes here until the next review goes cleanly.
                 </p>
               ) : (
                 <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -322,14 +365,10 @@ function App() {
                     >
                       <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 600, color: "#f87171" }}>
                         <span>{item.concept}</span>
-                        <span style={{ fontSize: "11px", background: "#4a2727", padding: "2px 8px", borderRadius: "4px" }}>
-                          Stage {item.stage}
-                        </span>
                       </div>
+                      <p style={{ margin: "6px 0 0", color: "#e5b4b4", fontSize: "12px" }}>{describeProgress(item)}</p>
                       {item.notes && <p style={{ margin: "6px 0 0", color: "#d1d5db", fontSize: "12px" }}>{item.notes}</p>}
-                      <p style={{ margin: "6px 0 0", color: "#b7a3a3", fontSize: "11px" }}>
-                        {item.attempts} attempts · {item.lastMisses} misses in previous review · {item.currentMisses} current misses
-                      </p>
+                      <p style={{ margin: "6px 0 0", color: "#b7a3a3", fontSize: "11px" }}>{describeAnswers(item)}</p>
                     </li>
                   ))}
                 </ul>
@@ -339,11 +378,11 @@ function App() {
             {/* Spaced Repetition Due Queue */}
             <div style={{ background: "#1a1b1d", border: "1px solid #2d2f32", borderRadius: "12px", padding: "20px" }}>
               <h2 style={{ margin: "0 0 14px", fontSize: "16px", color: "#e8c37d" }}>
-                Spaced Repetition Review Queue
+                Due for Review
               </h2>
               {dueCount === 0 ? (
                 <p style={{ color: "#8a8f94", margin: 0, fontSize: "13px" }}>
-                  All caught up! Next reviews scheduled at 7 days, 2 months, and 3 months.
+                  Nothing to review today. Concepts appear here on their review date. See Coming Up for what's next.
                 </p>
               ) : (
                 <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -363,10 +402,10 @@ function App() {
                       <div>
                         <strong style={{ color: "#fde047" }}>{item.concept}</strong>
                         <span style={{ display: "block", color: "#999e91", fontSize: "11px" }}>
-                          Due: {item.nextReview} (Current Stage: {item.stage})
+                          {describeProgress(item)}
                         </span>
                         <span style={{ display: "block", color: "#999e91", fontSize: "11px" }}>
-                          {item.attempts} attempts · {item.lastMisses} misses in previous review
+                          {describeAnswers(item)}
                         </span>
                       </div>
                       <span style={{ fontSize: "12px", color: "#fef08a", background: "#443c29", padding: "3px 8px", borderRadius: "4px" }}>
@@ -378,14 +417,37 @@ function App() {
               )}
             </div>
 
+            {/* Scheduled: in progress, next review still ahead */}
+            <div style={{ background: "#1a1b1d", border: "1px solid #2d2f32", borderRadius: "12px", padding: "20px" }}>
+              <h2 style={{ margin: "0 0 14px", fontSize: "16px", color: "#9cc3e6" }}>Coming Up</h2>
+              {scheduledItems.length === 0 ? (
+                <p style={{ color: "#8a8f94", margin: 0, fontSize: "13px" }}>
+                  Concepts waiting for their next review date show up here.
+                </p>
+              ) : (
+                <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "10px" }}>
+                  {scheduledItems.map((item) => (
+                    <li
+                      key={item.concept}
+                      style={{ padding: "10px 14px", background: "#171c21", border: "1px solid #29364a", borderRadius: "8px" }}
+                    >
+                      <strong style={{ color: "#bfdbfe" }}>{item.concept}</strong>
+                      <span style={{ display: "block", color: "#9aa4b1", fontSize: "11px" }}>{describeProgress(item)}</span>
+                      <span style={{ display: "block", color: "#9aa4b1", fontSize: "11px" }}>{describeAnswers(item)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
             {/* Mastered Topics */}
             <div style={{ background: "#1a1b1d", border: "1px solid #2d2f32", borderRadius: "12px", padding: "20px" }}>
               <h2 style={{ margin: "0 0 14px", fontSize: "16px", color: "#c4e0a2" }}>
-                Mastered Concepts (Stage 3 Complete)
+                Mastered (3 clean reviews in a row)
               </h2>
               {masteredCount === 0 ? (
                 <p style={{ color: "#8a8f94", margin: 0, fontSize: "13px" }}>
-                  Concepts reviewed successfully across all spaced repetition intervals will be permanently listed here.
+                  Nothing mastered yet. A concept is mastered after three clean reviews in a row, each on its review date.
                 </p>
               ) : (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
@@ -407,6 +469,17 @@ function App() {
                   ))}
                 </div>
               )}
+            </div>
+
+            {/* How the review schedule works (matches intervalDays in internal/progress/store.go) */}
+            <div style={{ background: "#1a1b1d", border: "1px solid #2d2f32", borderRadius: "12px", padding: "20px" }}>
+              <h2 style={{ margin: "0 0 10px", fontSize: "16px", color: "#c9ccd1" }}>How reviews work</h2>
+              <p style={{ color: "#8a8f94", margin: 0, fontSize: "13px", lineHeight: 1.5 }}>
+                A concept comes back after 14, 28, then 56 days if you've never missed it. After 1 miss it's
+                2, 4, 8 days, and after 2 or more misses it's 1, 2, 4 days. A wrong answer starts the count
+                over. Three clean reviews in a row master it. Correct answers before a review date count as
+                practice only.
+              </p>
             </div>
           </div>
         ) : (

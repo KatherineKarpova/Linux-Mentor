@@ -93,6 +93,10 @@ func saveUserPreferences(
 
 type ReviewItem = progress.ReviewItem
 
+// version is set at build time by scripts/package-release.sh
+// (-ldflags "-X main.version=..."); local builds report "dev".
+var version = "dev"
+
 var store *progress.Store
 var docsStore *docs.Store
 
@@ -283,7 +287,9 @@ type recordEvaluationOutput struct {
 	Concept    string `json:"concept"`
 	NewStage   int    `json:"new_stage"`
 	NextReview string `json:"next_review"`
-	Message    string `json:"message"`
+	// false when a correct answer came before the review date: saved as practice only
+	CountedAsReview bool   `json:"counted_as_review"`
+	Message         string `json:"message"`
 }
 
 func recordEvaluation(
@@ -302,13 +308,19 @@ func recordEvaluation(
 
 	msg := fmt.Sprintf("Recorded evaluation for '%s'. Stage is now %d (next review: %s)",
 		concept, item.Stage, item.NextReview.Format("2006-01-02"))
+	if item.LastAnswerEarly {
+		msg = fmt.Sprintf("Recorded a correct answer for '%s' as practice: it is not due for review until %s, "+
+			"so the stage stays %d. Only reviews on or after that date move it toward mastery.",
+			concept, item.NextReview.Format("2006-01-02"), item.Stage)
+	}
 
 	return nil, recordEvaluationOutput{
-		Success:    true,
-		Concept:    concept,
-		NewStage:   item.Stage,
-		NextReview: item.NextReview.Format(time.RFC3339),
-		Message:    msg,
+		Success:         true,
+		Concept:         concept,
+		NewStage:        item.Stage,
+		NextReview:      item.NextReview.Format(time.RFC3339),
+		CountedAsReview: !item.LastAnswerEarly,
+		Message:         msg,
 	}, nil
 }
 
@@ -325,7 +337,7 @@ func main() {
 	server := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "linux-mentor",
-			Version: "0.2.0",
+			Version: version,
 		},
 		nil,
 	)

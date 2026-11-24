@@ -30,7 +30,7 @@ mkdir -p "$out/bin" "$out/scripts" "$out/rules"
 cp "$repo/build/bin/linux-mentor" "$out/bin/linux-mentor-gui"
 
 # the MCP server (pure Go, including SQLite, so a static binary that runs anywhere)
-(cd "$repo" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$out/bin/linux-mentor-mcp" ./cmd/mcp-server)
+(cd "$repo" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${version#v}" -o "$out/bin/linux-mentor-mcp" ./cmd/mcp-server)
 
 # plugin files
 cp "$repo/plugin.json" "$repo/hooks.json" "$repo/mcp_config.json" "$repo/LINUXMENTOR.md" "$repo/README.md" "$repo/INSTALL.md" "$out/"
